@@ -1,0 +1,36 @@
+name: Bug Report
+description: Report an issue with a skill
+labels: ["bug"]
+body:
+  - type: input
+    id: skill
+    attributes:
+      label: Skill name
+      placeholder: e.g., subscription-audit
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Claude Code
+        - Wilson CLI
+        - Cursor
+        - Codex
+        - Paperclip
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      placeholder: Describe the issue
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: What should have happened instead?

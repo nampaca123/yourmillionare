@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Contributing Guide
+    url: https://github.com/openaccountant/skills/blob/main/CONTRIBUTING.md
+    about: How to create and submit a skill

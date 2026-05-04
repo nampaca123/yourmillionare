@@ -1,0 +1,33 @@
+name: New Skill Request
+description: Suggest a new financial skill
+labels: ["enhancement"]
+body:
+  - type: input
+    id: name
+    attributes:
+      label: Skill name suggestion
+      placeholder: e.g., freelance-invoice-generator
+    validations:
+      required: true
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - Personal finance
+        - Business / freelancer
+        - Shared (both)
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What should this skill do?
+      placeholder: Describe the workflow and who it helps
+    validations:
+      required: true
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      placeholder: When would someone trigger this skill?
