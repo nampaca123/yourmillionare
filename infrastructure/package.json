@@ -17,10 +17,15 @@
     "aws-cdk-lib": "^2.165.0",
     "cdk-nag": "^2.28.195",
     "constructs": "^10.4.2",
+    "pg": "^8.20.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@aws-sdk/client-rds-data": "^3.1041.0",
+    "@aws-sdk/rds-signer": "^3.1041.0",
+    "@types/pg": "^8.20.0",
     "aws-cdk": "^2.165.0",
+    "esbuild": "^0.21.5",
     "tsx": "^4.19.1"
   }
 }

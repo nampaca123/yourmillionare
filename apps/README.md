@@ -23,4 +23,4 @@ Dependency direction (enforced in code review):
 - `infrastructure` implements `application` ports; may import `domain`.
 - `application` MUST NOT import `infrastructure`.
 
-This directory is intentionally empty in Slice 1. The first domain package is added in Slice 2 (Identity & API skeleton).
+This directory is intentionally empty in Slices 1–2. The first domain package is added in **Slice 3 (Identity & API skeleton)**.

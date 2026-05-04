@@ -6,33 +6,53 @@ AWS cloud-native AI accounting agent for early-stage Korean startups. See `PLAN.
 
 ```
 yourmillionare/
-├── infrastructure/   # CDK TypeScript app (this slice)
-├── apps/             # Hexagonal application code (added from Slice 2)
+├── infrastructure/   # CDK TypeScript app (Slices 1–2 deployed)
+├── apps/             # Hexagonal application code (added from Slice 3)
+├── docs/             # Slice implementation reports
 ├── PLAN.md           # Product and architecture plan
-├── schema.sql        # Aurora PostgreSQL DDL
+├── schema.sql        # Aurora PostgreSQL DDL (Slice 2: RLS baseline applied)
 └── CLAUDE.md         # Engineering guidelines
 ```
 
-## Slice 1 Status — Bootstrap & Foundation
+## AWS Credentials Setup
 
-This slice ships the CDK baseline only. No real AWS resources are deployed yet.
+AWS keys live in `~/.aws/credentials` (never in `.env`).
 
-What is included:
+```bash
+aws configure --profile ym-dev
+# AWS Access Key ID: <your-key>
+# AWS Secret Access Key: <your-secret>
+# Default region: ap-northeast-2
+# Default output: json
+```
 
-- npm workspaces (`infrastructure/`, `apps/`)
-- CDK v2 TypeScript project with strict tsconfig + ESM
-- `FoundationStack` — shared KMS CMK + Secrets Manager slot for CODEF credentials
-- `cdk-nag` synthesis-time validation
-- Vitest assertion tests
-- GitHub Actions CI (lint + test + synth)
+`.env` holds non-AWS secrets only:
 
-What is NOT included (next slices):
+```
+ECOS_API_KEY=...
+CODEF_CLIENT_ID=...
+CODEF_CLIENT_SECRET=...
+CODEF_PUBLIC_KEY=...
+```
 
-- Cognito, API Gateway, Aurora, DynamoDB, RDS Proxy, VPC
-- Lambda handlers and hexagonal `apps/<domain>/` code
-- Real `cdk deploy` (requires AWS account preparation)
-- CODEF API integration (slot exists, value injected later)
-- AgentCore (Phase 1)
+## Slice 2 Status — Network & Data Foundation
+
+Deployed to `ap-northeast-2` (account 823401933116).
+
+What is deployed:
+
+- `Ym-Dev-Foundation` — shared KMS CMK + CODEF credentials secret
+- `Ym-Dev-Network` — VPC (6 subnets, no NAT), security groups, VPC endpoints (KMS/SM interface, S3/DDB gateway), Flow Logs
+- `Ym-Dev-Data` — Aurora Serverless v2 PG 15.10 (Data API, IAM auth, min ACU 0), 4 DynamoDB tables, schema migrator, verifier Lambdas
+- `schema.sql` applied with full RLS baseline (tenant isolation + user PII)
+
+What is NOT included yet (Slice 3+):
+
+- Cognito User Pool, API Gateway, public endpoints — Slice 3
+- Domain Lambda handlers under `apps/` — Slice 3
+- RDS Proxy — Slice 4 (added when Lambda volume warrants pooling)
+- NAT Gateway — Slice 4 (needed for CODEF outbound)
+- CODEF API integration — Slice 4+
 
 ## Local Development
 
@@ -40,39 +60,44 @@ Required: Node.js 20+, npm 10+.
 
 ```bash
 npm install
-npm run lint
 npm test
-CDK_ENV=dev AWS_ACCOUNT_ID=000000000000 npm run synth
+CDK_ENV=dev AWS_ACCOUNT_ID=823401933116 AWS_PROFILE=ym-dev npm run synth
 ```
 
-The synth output goes to `infrastructure/cdk.out/`.
+## Deploy Commands
 
-## Environment Variables
+```bash
+cd infrastructure
+
+# One-time bootstrap (already done)
+AWS_PROFILE=ym-dev CDK_ENV=dev AWS_ACCOUNT_ID=823401933116 npx cdk bootstrap
+
+# Deploy all stacks
+AWS_PROFILE=ym-dev CDK_ENV=dev AWS_ACCOUNT_ID=823401933116 npx cdk deploy --all --require-approval never
+
+# Deploy a specific stack
+AWS_PROFILE=ym-dev CDK_ENV=dev AWS_ACCOUNT_ID=823401933116 npx cdk deploy Ym-Dev-Network
+
+# Populate the CODEF secret (one-time, out-of-band)
+AWS_PROFILE=ym-dev aws secretsmanager put-secret-value \
+  --secret-id <CodefCredentialSecretArn> \
+  --secret-string '{"clientId":"...","clientSecret":"...","publicKey":"..."}' \
+  --region ap-northeast-2
+```
+
+## Environment Variables (CDK)
 
 | Variable | Required | Default | Notes |
 |---|---|---|---|
 | `CDK_ENV` | yes | — | `dev` or `prod` |
 | `AWS_REGION` | no | `ap-northeast-2` | Seoul region |
 | `AWS_ACCOUNT_ID` | yes | — | 12-digit account number |
-
-## Deploying (when AWS account is ready)
-
-```bash
-# One-time bootstrap per account/region
-cd infrastructure
-CDK_ENV=dev AWS_ACCOUNT_ID=<your-account> npx cdk bootstrap
-
-# Deploy the foundation stack
-CDK_ENV=dev AWS_ACCOUNT_ID=<your-account> npx cdk deploy Ym-Dev-Foundation
-
-# Populate the empty CODEF secret out-of-band
-aws secretsmanager put-secret-value \
-  --secret-id <CodefCredentialSecretArn from CfnOutput> \
-  --secret-string '{"clientId":"...","clientSecret":"..."}'
-```
+| `VPC_CIDR` | no | `10.20.0.0/16` | Override if CIDR conflicts |
 
 ## Open Items
 
-- **Account isolation**: this slice uses a single AWS account with `Ym-Dev-*` / `Ym-Prod-*` stack prefixes. PLAN.md §5.2 recommends account-level separation; revisit before Phase 1.
-- **Bedrock model access**: enable `anthropic.claude-sonnet-4` and `anthropic.claude-opus-4` in `ap-northeast-2` Bedrock console before Slice 5.
+- **Account isolation**: single AWS account with `Ym-Dev-*` / `Ym-Prod-*` prefixes. PLAN.md §5.2 recommends account-level separation; revisit before Phase 1.
+- **NAT Gateway decision**: Slice 4 chooses between NAT Gateway ($32+), `t4g.nano` NAT instance (~$3.5/mo), or PrivateLink for CODEF.
+- **Bedrock model access**: enable `anthropic.claude-sonnet-4` and `anthropic.claude-opus-4` in `ap-northeast-2` before Slice 5.
 - **Domain & Route53**: not configured. Decide before exposing public endpoints.
+- **Master secret rotation**: deferred to Slice 4 (with RDS Proxy).

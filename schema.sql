@@ -19,6 +19,13 @@
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+-- Migration version bookkeeping — CREATE TABLE IF NOT EXISTS so re-runs are safe
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version     VARCHAR(64)  PRIMARY KEY,
+  applied_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  sha256_hex  CHAR(64)     NOT NULL
+);
+
 
 -- ============================================================
 --  1. users — Cognito 사용자 1:1
@@ -117,6 +124,7 @@ CREATE TABLE accounts (
   is_active       BOOLEAN        NOT NULL DEFAULT true,
   PRIMARY KEY (tenant_id, code),
   FOREIGN KEY (tenant_id, parent_code) REFERENCES accounts(tenant_id, code)
+    DEFERRABLE INITIALLY IMMEDIATE
 );
 
 CREATE INDEX idx_accounts_type ON accounts(tenant_id, type) WHERE is_active;
@@ -270,3 +278,65 @@ CREATE INDEX idx_fx_latest ON fx_observations(quote_currency, rate_type, observe
 COMMENT ON TABLE  fx_observations             IS 'ECOS 매매기준율 + 시중은행 고시환율. closing은 IAS 21 마감환율 재측정에 사용';
 COMMENT ON COLUMN fx_observations.rate        IS '1 quote_currency = rate × base_currency. 예: USD→KRW이면 rate=1339.500000';
 COMMENT ON COLUMN fx_observations.rate_type   IS 'closing: 매매기준율. tt_buy/sell: 전신환. cash_buy/sell: 현찰';
+
+
+-- ============================================================
+--  Row Level Security — baseline policies (app_user role)
+--  Master role (migrator) bypasses RLS. Application Lambdas
+--  connect as app_user and must SET app.current_tenant_id /
+--  app.current_user_id on every checked-out connection.
+-- ============================================================
+
+-- Tenant-scoped tables
+ALTER TABLE tenants          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenant_members   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE accounts         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE journal_entries  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE journal_lines    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE raw_transactions ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_isolation ON tenants
+  FOR ALL TO app_user
+  USING      (id = current_setting('app.current_tenant_id', true)::uuid)
+  WITH CHECK (id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation ON tenant_members
+  FOR ALL TO app_user
+  USING      (tenant_id = current_setting('app.current_tenant_id', true)::uuid)
+  WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation ON accounts
+  FOR ALL TO app_user
+  USING      (tenant_id = current_setting('app.current_tenant_id', true)::uuid)
+  WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation ON journal_entries
+  FOR ALL TO app_user
+  USING      (tenant_id = current_setting('app.current_tenant_id', true)::uuid)
+  WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation ON journal_lines
+  FOR ALL TO app_user
+  USING      (tenant_id = current_setting('app.current_tenant_id', true)::uuid)
+  WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+CREATE POLICY tenant_isolation ON raw_transactions
+  FOR ALL TO app_user
+  USING      (tenant_id = current_setting('app.current_tenant_id', true)::uuid)
+  WITH CHECK (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
+
+-- User-scoped tables (PII)
+ALTER TABLE users         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY user_self_only ON users
+  FOR ALL TO app_user
+  USING      (id = current_setting('app.current_user_id', true)::uuid)
+  WITH CHECK (id = current_setting('app.current_user_id', true)::uuid);
+
+CREATE POLICY profile_self_only ON user_profiles
+  FOR ALL TO app_user
+  USING      (user_id = current_setting('app.current_user_id', true)::uuid)
+  WITH CHECK (user_id = current_setting('app.current_user_id', true)::uuid);
+
+-- fx_observations is intentionally excluded: cross-tenant shared FX data, no PII.
