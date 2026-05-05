@@ -1,6 +1,9 @@
-// Verifier (schema): confirms table list and RLS policies via Aurora Data API — no VPC needed.
+// Verifier (schema): validates table count and exact RLS policy whitelist via Data API.
 
-import { ExecuteStatementCommand, RDSDataClient } from '@aws-sdk/client-rds-data';
+import {
+  ExecuteStatementCommand,
+  RDSDataClient,
+} from '@aws-sdk/client-rds-data';
 
 interface CfnEvent {
   RequestType: 'Create' | 'Update' | 'Delete';
@@ -10,13 +13,9 @@ interface CfnEvent {
 interface VerifierOutput {
   check: 'schema';
   status: 'OK' | 'FAILED';
-  tables: string[];
-  policies: Array<{ table: string; name: string }>;
-  version: string;
-  expectedTableCount: number;
   actualTableCount: number;
-  expectedPolicyCount: number;
-  actualPolicyCount: number;
+  missingPolicies: string[];
+  extraPolicies: string[];
   errors: string[];
 }
 
@@ -26,28 +25,35 @@ const DATABASE = process.env.DATABASE_NAME ?? 'yourmillionare';
 const REGION = process.env.APP_REGION ?? process.env.AWS_REGION ?? 'ap-northeast-2';
 const PHYSICAL_ID = 'verifier-schema';
 
-const EXPECTED_TABLES = [
-  'accounts',
-  'fx_observations',
-  'journal_entries',
-  'journal_lines',
-  'raw_transactions',
-  'schema_migrations',
-  'tenant_members',
-  'tenants',
-  'user_profiles',
-  'users',
-];
+const EXPECTED_TABLE_COUNT = 10;
 
-const EXPECTED_POLICY_COUNT = 8;
+// Exact whitelist of (tablename:policyname) pairs that must exist after all migrations.
+// Removing or renaming any policy causes deployment to fail — intentional regression gate.
+const EXPECTED_POLICIES: ReadonlySet<string> = new Set([
+  'users:users_select_by_sub',
+  'users:users_modify_self',
+  'users:users_insert_by_sub',
+  'user_profiles:profile_self_only',
+  'tenants:tenants_select_by_membership',
+  'tenants:tenants_modify_current',
+  'tenants:tenants_insert_authenticated',
+  'tenant_members:tenant_members_visible',
+  'tenant_members:tenant_members_self_insert',
+  'tenant_members:tenant_members_admin_modify',
+  'tenant_members:tenant_members_admin_delete',
+  'accounts:tenant_isolation',
+  'journal_entries:tenant_isolation',
+  'journal_lines:tenant_isolation',
+  'raw_transactions:tenant_isolation',
+]);
 
 export const handler = async (event: CfnEvent): Promise<{ PhysicalResourceId: string }> => {
   if (event.RequestType === 'Delete') {
     return { PhysicalResourceId: event.PhysicalResourceId ?? PHYSICAL_ID };
   }
 
-  const client = new RDSDataClient({ region: REGION });
   const errors: string[] = [];
+  const client = new RDSDataClient({ region: REGION });
 
   const exec = (sql: string) =>
     client.send(
@@ -59,40 +65,53 @@ export const handler = async (event: CfnEvent): Promise<{ PhysicalResourceId: st
       }),
     );
 
-  const tablesRes = await exec(
-    `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY 1`,
-  );
-  const tables = (tablesRes.records ?? []).map((r) => r[0]?.stringValue ?? '').filter(Boolean);
+  let actualTableCount = 0;
+  let missingPolicies: string[] = [];
+  let extraPolicies: string[] = [];
 
-  const policiesRes = await exec(
-    `SELECT tablename, policyname FROM pg_policies WHERE schemaname = 'public' ORDER BY 1, 2`,
-  );
-  const policies = (policiesRes.records ?? []).map((r) => ({
-    table: r[0]?.stringValue ?? '',
-    name: r[1]?.stringValue ?? '',
-  }));
-
-  const versionRes = await exec(`SELECT version FROM schema_migrations ORDER BY applied_at DESC LIMIT 1`);
-  const version = versionRes.records?.[0]?.[0]?.stringValue ?? 'unknown';
-
-  const missingTables = EXPECTED_TABLES.filter((t) => !tables.includes(t));
-  if (missingTables.length > 0) {
-    errors.push(`Missing tables: ${missingTables.join(', ')}`);
+  try {
+    const tableResult = await exec(
+      `SELECT COUNT(*) FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`,
+    );
+    actualTableCount = Number(tableResult.records?.[0]?.[0]?.longValue ?? 0);
+    if (actualTableCount !== EXPECTED_TABLE_COUNT) {
+      errors.push(`Expected ${EXPECTED_TABLE_COUNT} tables, found ${actualTableCount}`);
+    }
+  } catch (err) {
+    errors.push(`Table count query failed: ${err instanceof Error ? err.message : String(err)}`);
   }
-  if (policies.length < EXPECTED_POLICY_COUNT) {
-    errors.push(`Expected at least ${EXPECTED_POLICY_COUNT} RLS policies, found ${policies.length}`);
+
+  try {
+    const policyResult = await exec(
+      `SELECT tablename, policyname FROM pg_policies WHERE schemaname = 'public' ORDER BY tablename, policyname`,
+    );
+
+    const actualPolicies = new Set<string>(
+      (policyResult.records ?? []).map(
+        (row) => `${row[0]?.stringValue ?? ''}:${row[1]?.stringValue ?? ''}`,
+      ),
+    );
+
+    missingPolicies = [...EXPECTED_POLICIES].filter((p) => !actualPolicies.has(p));
+    extraPolicies = [...actualPolicies].filter((p) => !EXPECTED_POLICIES.has(p));
+
+    if (missingPolicies.length > 0) {
+      errors.push(`Missing RLS policies: ${missingPolicies.join(', ')}`);
+    }
+    if (extraPolicies.length > 0) {
+      errors.push(`Unexpected RLS policies (whitelist mismatch): ${extraPolicies.join(', ')}`);
+    }
+  } catch (err) {
+    errors.push(`Policy query failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   const output: VerifierOutput = {
     check: 'schema',
     status: errors.length === 0 ? 'OK' : 'FAILED',
-    tables,
-    policies,
-    version,
-    expectedTableCount: EXPECTED_TABLES.length,
-    actualTableCount: tables.length,
-    expectedPolicyCount: EXPECTED_POLICY_COUNT,
-    actualPolicyCount: policies.length,
+    actualTableCount,
+    missingPolicies,
+    extraPolicies,
     errors,
   };
 

@@ -7,6 +7,8 @@ import { loadEnvConfig } from '../lib/config/env.config.js';
 import { FoundationStack } from '../lib/stacks/foundation.stack.js';
 import { NetworkStack } from '../lib/stacks/network.stack.js';
 import { DataStack } from '../lib/stacks/data.stack.js';
+import { IdentityStack } from '../lib/stacks/identity.stack.js';
+import { ApiStack } from '../lib/stacks/api.stack.js';
 
 const config = loadEnvConfig();
 const env = { account: config.account, region: config.region };
@@ -48,6 +50,25 @@ const data = new DataStack(app, `${config.stackPrefix}-Data`, {
 });
 data.addDependency(network);
 data.addDependency(foundation);
+
+const identity = new IdentityStack(app, `${config.stackPrefix}-Identity`, {
+  env,
+  deploymentEnv: config.env,
+});
+identity.addDependency(foundation);
+
+const api = new ApiStack(app, `${config.stackPrefix}-Api`, {
+  env,
+  deploymentEnv: config.env,
+  vpc: network.vpc,
+  lambdaSg: network.lambdaSg,
+  aurora: data.aurora,
+  identity,
+  sharedKey: foundation.sharedKey,
+});
+api.addDependency(network);
+api.addDependency(data);
+api.addDependency(identity);
 
 Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));
 

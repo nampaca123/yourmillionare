@@ -1,7 +1,7 @@
-// Schema migrator: applies db-bootstrap.sql then schema.sql via Aurora Data API (no VPC).
+// Schema migrator: applies db-bootstrap.sql, schema.sql, then incremental migrations/ in order.
 
 import { createHash } from 'crypto';
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 
 import {
@@ -28,6 +28,10 @@ const SECRET_ARN = process.env.SECRET_ARN ?? '';
 const DATABASE = process.env.DATABASE_NAME ?? 'yourmillionare';
 const REGION = process.env.APP_REGION ?? process.env.AWS_REGION ?? 'ap-northeast-2';
 const PHYSICAL_ID = 'schema-migration';
+
+function sha256Hex(content: string): string {
+  return createHash('sha256').update(content).digest('hex');
+}
 
 function splitStatements(sql: string): string[] {
   const statements: string[] = [];
@@ -138,20 +142,44 @@ async function execStatements(
   }
 }
 
-export const handler = async (event: CfnEvent): Promise<CfnResult> => {
-  if (event.RequestType === 'Delete') {
-    return { PhysicalResourceId: event.PhysicalResourceId ?? PHYSICAL_ID };
-  }
+async function isVersionApplied(
+  client: RDSDataClient,
+  version: string,
+  transactionId: string,
+): Promise<boolean> {
+  const result = await client.send(
+    new ExecuteStatementCommand({
+      resourceArn: CLUSTER_ARN,
+      secretArn: SECRET_ARN,
+      database: DATABASE,
+      transactionId,
+      sql: `SELECT 1 FROM schema_migrations WHERE version = '${version}'`,
+    }),
+  );
+  return (result.records?.length ?? 0) > 0;
+}
 
-  const bootstrapSql = readFileSync(join(__dirname, 'db-bootstrap.sql'), 'utf8');
-  const schemaSql = readFileSync(join(__dirname, 'schema.sql'), 'utf8');
+async function recordVersion(
+  client: RDSDataClient,
+  version: string,
+  sha256: string,
+  transactionId: string,
+): Promise<void> {
+  await client.send(
+    new ExecuteStatementCommand({
+      resourceArn: CLUSTER_ARN,
+      secretArn: SECRET_ARN,
+      database: DATABASE,
+      transactionId,
+      sql: `INSERT INTO schema_migrations (version, sha256_hex) VALUES ('${version}', '${sha256}')`,
+    }),
+  );
+}
 
-  const version = createHash('sha256')
-    .update(bootstrapSql + schemaSql)
-    .digest('hex');
-
-  const client = new RDSDataClient({ region: REGION });
-
+async function runInTransaction(
+  client: RDSDataClient,
+  work: (txId: string) => Promise<void>,
+): Promise<void> {
   const { transactionId } = await client.send(
     new BeginTransactionCommand({
       resourceArn: CLUSTER_ARN,
@@ -159,45 +187,10 @@ export const handler = async (event: CfnEvent): Promise<CfnResult> => {
       database: DATABASE,
     }),
   );
-
   if (!transactionId) throw new Error('Failed to begin transaction');
 
   try {
-    await execStatements(client, splitStatements(bootstrapSql), transactionId);
-
-    const existing = await client.send(
-      new ExecuteStatementCommand({
-        resourceArn: CLUSTER_ARN,
-        secretArn: SECRET_ARN,
-        database: DATABASE,
-        transactionId,
-        sql: `SELECT 1 FROM schema_migrations WHERE version = '${version}'`,
-      }),
-    );
-
-    if ((existing.records?.length ?? 0) > 0) {
-      await client.send(
-        new CommitTransactionCommand({
-          resourceArn: CLUSTER_ARN,
-          secretArn: SECRET_ARN,
-          transactionId,
-        }),
-      );
-      return { PhysicalResourceId: PHYSICAL_ID, Data: { Version: version, Skipped: 'true' } };
-    }
-
-    await execStatements(client, splitStatements(schemaSql), transactionId);
-
-    await client.send(
-      new ExecuteStatementCommand({
-        resourceArn: CLUSTER_ARN,
-        secretArn: SECRET_ARN,
-        database: DATABASE,
-        transactionId,
-        sql: `INSERT INTO schema_migrations (version, sha256_hex) VALUES ('${version}', '${version}')`,
-      }),
-    );
-
+    await work(transactionId);
     await client.send(
       new CommitTransactionCommand({
         resourceArn: CLUSTER_ARN,
@@ -205,8 +198,6 @@ export const handler = async (event: CfnEvent): Promise<CfnResult> => {
         transactionId,
       }),
     );
-
-    return { PhysicalResourceId: PHYSICAL_ID, Data: { Version: version, Skipped: 'false' } };
   } catch (err) {
     await client.send(
       new RollbackTransactionCommand({
@@ -217,4 +208,69 @@ export const handler = async (event: CfnEvent): Promise<CfnResult> => {
     ).catch(() => undefined);
     throw err;
   }
+}
+
+export const handler = async (event: CfnEvent): Promise<CfnResult> => {
+  if (event.RequestType === 'Delete') {
+    return { PhysicalResourceId: event.PhysicalResourceId ?? PHYSICAL_ID };
+  }
+
+  const bootstrapSql = readFileSync(join(__dirname, 'db-bootstrap.sql'), 'utf8');
+  const schemaSql = readFileSync(join(__dirname, 'schema.sql'), 'utf8');
+
+  const baseVersion = sha256Hex(bootstrapSql + schemaSql);
+  const client = new RDSDataClient({ region: REGION });
+
+  // --- Phase 1: bootstrap + base schema (single transaction) ---
+  await runInTransaction(client, async (txId) => {
+    await execStatements(client, splitStatements(bootstrapSql), txId);
+
+    if (await isVersionApplied(client, baseVersion, txId)) {
+      return;
+    }
+
+    await execStatements(client, splitStatements(schemaSql), txId);
+    await recordVersion(client, baseVersion, baseVersion, txId);
+  });
+
+  // --- Phase 2: incremental migrations, one transaction per file ---
+  // Partial-failure behaviour: if a file fails, only that file's transaction is rolled back.
+  // The file's version row is NOT written, so the next deployment re-tries it from scratch.
+  // Files that already committed keep their rows and are skipped on retry.
+  const migrationsDir = join(__dirname, 'migrations');
+  let migrationFiles: string[] = [];
+  try {
+    migrationFiles = readdirSync(migrationsDir)
+      .filter((f) => f.endsWith('.sql'))
+      .sort();
+  } catch {
+    // migrations/ dir not present — nothing to apply
+  }
+
+  const applied: string[] = [];
+  const skipped: string[] = [];
+
+  for (const filename of migrationFiles) {
+    const sql = readFileSync(join(migrationsDir, filename), 'utf8');
+    const hash = sha256Hex(sql);
+
+    await runInTransaction(client, async (txId) => {
+      if (await isVersionApplied(client, filename, txId)) {
+        skipped.push(filename);
+        return;
+      }
+      await execStatements(client, splitStatements(sql), txId);
+      await recordVersion(client, filename, hash, txId);
+      applied.push(filename);
+    });
+  }
+
+  return {
+    PhysicalResourceId: PHYSICAL_ID,
+    Data: {
+      BaseVersion: baseVersion,
+      MigrationsApplied: applied.join(','),
+      MigrationsSkipped: skipped.join(','),
+    },
+  };
 };

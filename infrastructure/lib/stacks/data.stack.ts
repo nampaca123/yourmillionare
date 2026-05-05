@@ -39,6 +39,8 @@ function sha256(content: Buffer): string {
 }
 
 export class DataStack extends Stack {
+  public readonly aurora: AuroraConstruct;
+
   constructor(scope: Construct, id: string, props: DataStackProps) {
     super(scope, id, props);
 
@@ -47,11 +49,13 @@ export class DataStack extends Stack {
     const account = Stack.of(this).account;
 
     // --- Aurora ---
-    const aurora = new AuroraConstruct(this, 'AuroraCluster', {
+    this.aurora = new AuroraConstruct(this, 'AuroraCluster', {
       deploymentEnv: props.deploymentEnv,
       vpc: props.vpc,
       auroraSg: props.auroraSg,
     });
+
+    const aurora = this.aurora;
 
     // --- DynamoDB tables ---
     const cache = new CacheConstruct(this, 'Cache', {
@@ -95,6 +99,7 @@ export class DataStack extends Stack {
           afterBundling: (_inputDir: string, outputDir: string) => [
             `cp "${SCHEMA_PATH}" "${outputDir}/schema.sql"`,
             `cp "${BOOTSTRAP_PATH}" "${outputDir}/db-bootstrap.sql"`,
+            `cp -R "${join(__dirname, 'data/sql/migrations')}" "${outputDir}/migrations"`,
           ],
           beforeBundling: () => [],
           beforeInstall: () => [],
@@ -165,6 +170,8 @@ export class DataStack extends Stack {
       securityGroups: [props.lambdaSg],
       environment: {
         CLUSTER_ENDPOINT: aurora.cluster.clusterEndpoint.hostname,
+        CLUSTER_ARN: aurora.cluster.clusterArn,
+        SECRET_ARN: aurora.masterSecret.secretArn,
         CLUSTER_PORT: '5432',
         DATABASE_NAME: 'yourmillionare',
         APP_REGION: region,
@@ -183,6 +190,8 @@ export class DataStack extends Stack {
         ],
       }),
     );
+    aurora.cluster.grantDataApiAccess(verifierIamFn);
+    aurora.masterSecret.grantRead(verifierIamFn);
 
     const verifierIamProvider = new Provider(this, 'VerifierIamProvider', {
       onEventHandler: verifierIamFn,
