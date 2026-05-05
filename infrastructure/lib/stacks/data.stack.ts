@@ -59,6 +59,19 @@ export class DataStack extends Stack {
       sharedKey: props.sharedKey,
     });
 
+    if (!isProd) {
+      const ddb3Suppression = [
+        {
+          id: 'AwsSolutions-DDB3',
+          reason: 'Cache tables disable PITR in dev for cost savings; cache data is ephemeral and can be regenerated from Aurora.',
+        },
+      ];
+      NagSuppressions.addResourceSuppressions(cache.monthlySummaryCache, ddb3Suppression);
+      NagSuppressions.addResourceSuppressions(cache.transactionCache, ddb3Suppression);
+      NagSuppressions.addResourceSuppressions(cache.idempotencyKeys, ddb3Suppression);
+      NagSuppressions.addResourceSuppressions(cache.costCounter, ddb3Suppression);
+    }
+
     // --- Schema migrator Lambda (no VPC, Data API) ---
     const schemaSha256 = sha256(readFileSync(SCHEMA_PATH));
     const bootstrapSha256 = sha256(readFileSync(BOOTSTRAP_PATH));

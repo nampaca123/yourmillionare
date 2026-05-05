@@ -13,6 +13,13 @@ const env = { account: config.account, region: config.region };
 
 const app = new App();
 
+// Pre-populate AZ context so Vpc does not emit a "missing context" entry.
+// CDK's Vpc always requests this lookup even when availabilityZones is passed
+// explicitly; without the cached value CDK CLI tries to call EC2 DescribeAZs at
+// synth time, which fails in CI (dummy account, no credentials).
+const regionAzs = [`${config.region}a`, `${config.region}b`, `${config.region}c`];
+app.node.setContext(`availability-zones:account=${config.account}:region=${config.region}`, regionAzs);
+
 Tags.of(app).add('Project', 'yourmillionare');
 Tags.of(app).add('Environment', config.env);
 Tags.of(app).add('ManagedBy', 'cdk');
@@ -27,6 +34,7 @@ const network = new NetworkStack(app, `${config.stackPrefix}-Network`, {
   env,
   deploymentEnv: config.env,
   vpcCidr: config.vpcCidr,
+  availabilityZones: [`${config.region}a`, `${config.region}b`, `${config.region}c`],
 });
 network.addDependency(foundation);
 

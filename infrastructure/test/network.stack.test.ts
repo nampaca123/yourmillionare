@@ -20,6 +20,7 @@ const buildStack = (env: 'dev' | 'prod' = 'dev') => {
   const network = new NetworkStack(app, 'Ym-Network', {
     env: { account: TEST_ACCOUNT, region: TEST_REGION },
     deploymentEnv: env,
+    availabilityZones: [`${TEST_REGION}a`, `${TEST_REGION}b`, `${TEST_REGION}c`],
   });
 
   Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));

@@ -26,6 +26,7 @@ import type { DeploymentEnv } from '../config/env.config.js';
 export interface NetworkStackProps extends StackProps {
   readonly deploymentEnv: DeploymentEnv;
   readonly vpcCidr?: string;
+  readonly availabilityZones: string[];
 }
 
 export class NetworkStack extends Stack {
@@ -38,6 +39,7 @@ export class NetworkStack extends Stack {
 
     const isProd = props.deploymentEnv === 'prod';
     const vpcCidr = props.vpcCidr ?? '10.20.0.0/16';
+    const azs = props.availabilityZones;
 
     // Local CMK for Flow Logs. CloudWatch Logs requires an explicit KMS key policy grant
     // allowing the logs service principal — using a cross-stack key would force a
@@ -64,7 +66,7 @@ export class NetworkStack extends Stack {
     // PRIVATE_WITH_EGRESS is deferred to Slice 4 together with the NAT decision.
     this.vpc = new Vpc(this, 'Vpc', {
       ipAddresses: IpAddresses.cidr(vpcCidr),
-      maxAzs: 3,
+      availabilityZones: azs,
       natGateways: 0,
       subnetConfiguration: [
         { name: 'public', subnetType: SubnetType.PUBLIC, cidrMask: 24 },
@@ -102,9 +104,10 @@ export class NetworkStack extends Stack {
 
     // Interface endpoints — 1 AZ in dev (cost: 2 ENI × $0.01/h = ~$14.6/mo),
     // 3 AZ in prod (6 ENI, ~$43.8/mo). secretsmanager and kms only.
+    // azs[0] comes from props (no context lookup) so this is safe at synth time.
     const endpointSubnets = isProd
       ? { subnetType: SubnetType.PRIVATE_ISOLATED }
-      : { availabilityZones: [this.availabilityZones[0]], subnetType: SubnetType.PRIVATE_ISOLATED };
+      : { availabilityZones: [azs[0]], subnetType: SubnetType.PRIVATE_ISOLATED };
 
     this.vpc.addInterfaceEndpoint('SecretsManagerEndpoint', {
       service: InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
@@ -136,5 +139,24 @@ export class NetworkStack extends Stack {
         reason: 'Flow Logs CMK has key rotation enabled; this suppression covers any remaining KMS rule.',
       },
     ]);
+
+    const endpointNagSuppression = [
+      {
+        id: 'CdkNagValidationFailure',
+        reason:
+          'AwsSolutions-EC23 validation fails because the ingress CIDR rule uses Fn::GetAtt for the VPC CIDR block. ' +
+          'The rule cannot evaluate intrinsic functions at synth time; the actual SG restricts ingress to the VPC CIDR only.',
+      },
+    ];
+    NagSuppressions.addResourceSuppressionsByPath(
+      this,
+      `/${id}/Vpc/SecretsManagerEndpoint/SecurityGroup/Resource`,
+      endpointNagSuppression,
+    );
+    NagSuppressions.addResourceSuppressionsByPath(
+      this,
+      `/${id}/Vpc/KmsEndpoint/SecurityGroup/Resource`,
+      endpointNagSuppression,
+    );
   }
 }
