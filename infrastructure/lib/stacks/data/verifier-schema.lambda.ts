@@ -96,7 +96,7 @@ export const handler = async (event: CfnEvent): Promise<{ PhysicalResourceId: st
     errors,
   };
 
-  console.log(JSON.stringify(output));
+  process.stdout.write(JSON.stringify(output) + '\n');
 
   if (errors.length > 0) {
     throw new Error(`Schema verification failed: ${errors.join('; ')}`);
