@@ -1,6 +1,6 @@
 # 슬라이스 2 — 네트워크 & 데이터 기반
 
-*작성 기준: 2026-05-04. 배포는 현재 마무리 단계. 재배포 완료 후 검증 결과를 추가 업데이트 예정.*
+*작성 기준: 2026-05-05. 배포 및 검증 완료. 슬라이스 2 닫힘.*
 
 ---
 
@@ -183,8 +183,16 @@ if (!inDollarQuote && !inSingleQuote && !inBlockComment && ch === ';') { ... }
 
 ---
 
+## 검증 결과 (2026-05-05 17:50 KST)
+
+`verifier-schema` — `status: OK`. 테이블 10개, RLS 정책 8개 모두 확인.
+
+`verifier-iam` — `status: OK`. IAM 토큰으로 `app_user` 직접 연결 성공 (2127ms).
+
+슬라이스 2 닫힘.
+
+---
+
 ## 다음은
 
-재배포가 끝나면 CloudWatch에서 `verifier-schema` 로그를 꺼내 테이블 8개와 RLS 정책이 다 찍혀있는지 확인한다. `verifier-iam` 로그에서 IAM 연결이 성공했으면 슬라이스 2가 닫힌다.
-
-슬라이스 3은 Cognito + API Gateway + 첫 앱 Lambda. `apps/` 디렉터리가 그때 처음 채워진다.
+슬라이스 3: Cognito + API Gateway + 첫 앱 Lambda. `apps/` 디렉터리가 처음 채워진다.

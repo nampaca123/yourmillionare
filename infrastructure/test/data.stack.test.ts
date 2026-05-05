@@ -27,7 +27,6 @@ const buildStack = (env: 'dev' | 'prod' = 'dev') => {
   const network = new NetworkStack(app, 'Ym-Network', {
     env: { account: TEST_ACCOUNT, region: TEST_REGION },
     deploymentEnv: env,
-    sharedKey: foundation.sharedKey,
   });
 
   const data = new DataStack(app, 'Ym-Data', {

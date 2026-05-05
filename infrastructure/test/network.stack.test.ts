@@ -5,7 +5,6 @@ import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { describe, it, expect, beforeAll } from 'vitest';
 
-import { FoundationStack } from '../lib/stacks/foundation.stack.js';
 import { NetworkStack } from '../lib/stacks/network.stack.js';
 
 const TEST_ACCOUNT = '123456789012';
@@ -17,11 +16,6 @@ const buildStack = (env: 'dev' | 'prod' = 'dev') => {
   Tags.of(app).add('Environment', env);
   Tags.of(app).add('ManagedBy', 'cdk');
   Tags.of(app).add('Owner', 'platform');
-
-  const foundation = new FoundationStack(app, 'Ym-Foundation', {
-    env: { account: TEST_ACCOUNT, region: TEST_REGION },
-    deploymentEnv: env,
-  });
 
   const network = new NetworkStack(app, 'Ym-Network', {
     env: { account: TEST_ACCOUNT, region: TEST_REGION },

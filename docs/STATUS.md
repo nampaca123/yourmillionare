@@ -1,4 +1,4 @@
-# Slice 2 배포 현황 (2026-05-04)
+# Slice 2 배포 현황 (2026-05-05)
 
 ## 스택별 상태
 
@@ -6,9 +6,20 @@
 |------|------|------|
 | `Ym-Dev-Foundation` | ✅ DEPLOYED | KMS CMK, CODEF Secrets 슬롯 |
 | `Ym-Dev-Network` | ✅ DEPLOYED | VPC, SG, VPC Endpoints, Flow Logs |
-| `Ym-Dev-Data` | ⏳ ROLLBACK_IN_PROGRESS | Aurora 삭제 완료 대기 중 |
+| `Ym-Dev-Data` | ✅ DEPLOYED | Aurora, DynamoDB, 마이그레이터, 검증 Lambda |
 
-## Data 스택 실패 원인 및 조치
+## 검증 결과 (2026-05-05 17:50 KST)
+
+### verifier-schema
+- `status: OK`
+- 테이블 10개 확인 (`actualTableCount: 10`)
+- RLS 정책 8개 확인 (`actualPolicyCount: 8`)
+
+### verifier-iam
+- `status: OK`
+- IAM 토큰으로 `app_user` Aurora 직접 연결 성공 (`iamConnectMs: 2127`)
+
+## Data 스택 배포 실패 이력 및 조치
 
 ### 1차 실패 — `Cannot find DBInstance in DBCluster`
 - **원인**: `SchemaMigration` Custom Resource가 `AuroraCluster`(DBCluster CFN 리소스) 완료 직후 실행됨. 그러나 Data API는 `AuroraCluster/writer`(DBInstance)가 **기동 완료된 뒤에만** 호출 가능.
@@ -18,16 +29,9 @@
 - **원인**: `splitStatements()` 내 `;` 분리 로직에 `!inDollarQuote` 가드 누락. `CREATE OR REPLACE FUNCTION ... $$ ... $$` 본문 안의 `;`(PL/pgSQL 내부 세미콜론)가 문장 구분자로 오인되어 함수가 중간에 잘린 채 실행됨.
 - **조치**: `if (ch === ';')` → `if (!inDollarQuote && !inSingleQuote && !inBlockComment && ch === ';')` 수정 완료.
 
-## 다음 단계
-
-rollback이 완료되면 아래 명령으로 재배포:
-```bash
-cd infrastructure
-AWS_PROFILE=ym-dev CDK_ENV=dev AWS_ACCOUNT_ID=823401933116 \
-  npx cdk deploy --all --require-approval never
-```
-
-Aurora 클러스터 삭제·재생성 포함 예상 소요 시간: **약 20~25분**.
+### 추가 수정 — TypeScript lint 에러
+- **원인 1**: `exactOptionalPropertyTypes: true`(tsconfig.base.json)가 CDK 타입(`IVpc.vpnGatewayId?: string` vs `Vpc.get vpnGatewayId(): string | undefined`)과 충돌. CDK 미지원 옵션으로 인프라 서브프로젝트 한정 `false` override.
+- **원인 2**: `NetworkStack`에 `sharedKey`가 제거된 이후 테스트 코드가 구 시그니처를 그대로 넘기던 문제. `data.stack.test.ts` 및 `network.stack.test.ts` 정정.
 
 ## 테스트 현황
 
@@ -56,3 +60,8 @@ cdk-nag 에러 0건. 모든 단위 테스트 통과.
 | `infrastructure/test/network.stack.test.ts` | NetworkStack 단위 테스트 |
 | `infrastructure/test/data.stack.test.ts` | DataStack 단위 테스트 |
 | `README.md` | Slice 2 기준 전면 업데이트 |
+| `infrastructure/tsconfig.json` | `exactOptionalPropertyTypes: false` override (CDK 타입 호환) |
+
+## 다음 단계
+
+슬라이스 2 완료. → **슬라이스 3**: Cognito + API Gateway + 첫 앱 Lambda. `apps/` 디렉터리 처음 채워짐.
