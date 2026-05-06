@@ -176,8 +176,9 @@ if (!inDollarQuote && !inSingleQuote && !inBlockComment && ch === ';') { ... }
 | VPC Interface Endpoint 2개 × 1 AZ | ~$14.6 |
 | Flow Logs (CloudWatch) | ~$1~3 |
 | DynamoDB (초기 트래픽 없음) | ~$0 |
-| KMS 로컬 키 3개 | ~$3 |
-| **합계 (유휴 시)** | **~$18~20/월** |
+| KMS 키 4개 (SharedKey + FlowLogsKey + AuroraStorageKey + AuroraSecretKey) | ~$4 |
+| Secrets Manager (CODEF 자격증명 슬롯, Slice 1 생성) | ~$0.40 |
+| **합계 (유휴 시)** | **~$19~21/월** |
 
 원래 계획이 ~$177/월이었는데, 비용 최적화 작업으로 ~$23/월까지 줄었다. 가장 큰 기여는 Aurora scale-to-zero와 Interface Endpoint 1 AZ 제한이다.
 

@@ -15,6 +15,13 @@
 --    - notifications  (운영 이벤트)
 --    - ai_decisions   (reversed_by 체인으로 우회)
 --    - 화면 캐시      (DynamoDB로 별도 처리)
+--
+--  스키마 변경 이력
+--    이 파일은 슬라이스 2 초기화 베이스라인으로 고정됩니다.
+--    슬라이스 2 이후 변경은 migrations/ 폴더의 순번 파일로 관리합니다.
+--    현재 활성 마이그레이션:
+--      - migrations/0001-onboarding-rls.sql (Slice 3 RLS 재정의, 15개 정책)
+--    verifier-schema.lambda.ts 의 EXPECTED_POLICIES 가 활성 정책 전체 목록입니다.
 -- ============================================================
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -81,7 +88,7 @@ CREATE TABLE tenants (
 );
 
 COMMENT ON TABLE  tenants                      IS '법인/개인사업자 단위. 청년창업 세액감면 판정은 founded_on + region_code';
-COMMENT ON COLUMN tenants.biz_reg_no_encrypted IS '사업자등록번호. 앱 레이어에서 KMS DEK + pgcrypto로 암호화 후 저장';
+COMMENT ON COLUMN tenants.biz_reg_no_encrypted IS '사업자등록번호. 앱 레이어에서 KMS Encrypt API로 직접 암호화 후 저장 (10자리 이하라 DEK 패턴 불필요, pgcrypto 미사용)';
 COMMENT ON COLUMN tenants.biz_reg_no_hash      IS '결정적 HMAC. 중복 검사용 (별도 키 사용 권장)';
 COMMENT ON COLUMN tenants.functional_currency  IS 'K-IFRS IAS 21 기능통화. 한국 법인은 보통 KRW';
 COMMENT ON COLUMN tenants.region_code          IS '예: SEOUL_OVERCROWDED, METRO_NON_OVERCROWDED, NON_METRO. 감면율 산정 키';

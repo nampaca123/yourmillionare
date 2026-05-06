@@ -24,7 +24,7 @@ export class FoundationStack extends Stack {
     const removalPolicy = isProd ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY;
 
     this.sharedKey = new Key(this, 'SharedKey', {
-      description: 'Shared CMK for envelope encryption across YourMillionare stacks.',
+      description: 'CMK for cross-stack secrets that do not require key-policy mutation (CODEF Secret, DynamoDB).',
       enableKeyRotation: true,
       removalPolicy,
     });

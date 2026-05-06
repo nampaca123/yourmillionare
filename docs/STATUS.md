@@ -12,7 +12,7 @@
 
 ---
 
-## Slice 2 검증 결과 (2026-05-05 17:50 KST)
+## Slice 2 검증 결과 (2026-05-05 17:50 KST — 슬라이스 3 배포 후에는 RLS 정책 15개로 갱신 예정)
 
 ### verifier-schema
 - `status: OK`
@@ -53,9 +53,23 @@ cdk-nag 에러 0건. 모든 단위 테스트 통과.
 
 ---
 
-## 다음 단계
+## 슬라이스 4 범위 (확정)
 
-슬라이스 3 완료. → **슬라이스 4**: RDS Proxy, POST /tenants Idempotency-Key, 분개 도메인 첫 Lambda.
+슬라이스 3 코드 완료, 배포 후 → 슬라이스 4 시작.
+
+| 항목 | 근거 출처 |
+|------|-----------|
+| RDS Proxy 도입 (Lambda 커넥션 풀링) | README Open Items, 03문서 §7 |
+| NAT Gateway vs NAT Instance 결정 + 구성 | README Open Items, 02문서 §네트워크 |
+| `POST /tenants` Idempotency-Key — `IdempotencyKeys` DynamoDB 활용, 24h 응답 재현 | 03문서 §7, STATUS 이전 노트 |
+| Aurora 마스터 시크릿 자동 로테이션 활성화 | README Open Items |
+| 분개 도메인 첫 Lambda (`apps/journal`) | STATUS 이전 노트 |
+
+슬라이스 4 완료 후 CODEF 어댑터 연동(슬라이스 5)으로 넘어간다.
+
+---
+
+## Slice 2 검증 결과 (참고 — 슬라이스 3 배포 전 기준)
 
 ---
 

@@ -6,11 +6,11 @@ AWS cloud-native AI accounting agent for early-stage Korean startups. See `PLAN.
 
 ```
 yourmillionare/
-├── infrastructure/   # CDK TypeScript app (Slices 1–2 deployed)
-├── apps/             # Hexagonal application code (added from Slice 3)
-├── docs/             # Slice implementation reports
+├── infrastructure/   # CDK TypeScript app (Slices 1–3 code complete; 1–2 deployed)
+├── apps/             # Hexagonal application code (identity domain, Slice 3+)
+├── docs/             # Slice implementation reports (01–03)
 ├── PLAN.md           # Product and architecture plan
-├── schema.sql        # Aurora PostgreSQL DDL (Slice 2: RLS baseline applied)
+├── schema.sql        # Aurora PostgreSQL DDL baseline (Slice 2); see migrations/ for Slice 3+
 └── CLAUDE.md         # Engineering guidelines
 ```
 
@@ -35,23 +35,32 @@ CODEF_CLIENT_SECRET=...
 CODEF_PUBLIC_KEY=...
 ```
 
-## Slice 2 Status — Network & Data Foundation
+## Slice 3 Status — Identity & API (code complete, deploy pending)
 
-Deployed to `ap-northeast-2` (account 823401933116).
+`Ym-Dev-Foundation`, `Ym-Dev-Network`, `Ym-Dev-Data` deployed to `ap-northeast-2` (account 823401933116).
+`Ym-Dev-Identity`, `Ym-Dev-Api` code complete — **not yet deployed**.
 
-What is deployed:
+What is deployed (Slices 1–2):
 
-- `Ym-Dev-Foundation` — shared KMS CMK + CODEF credentials secret
+- `Ym-Dev-Foundation` — shared KMS CMK + CODEF credentials secret slot
 - `Ym-Dev-Network` — VPC (6 subnets, no NAT), security groups, VPC endpoints (KMS/SM interface, S3/DDB gateway), Flow Logs
 - `Ym-Dev-Data` — Aurora Serverless v2 PG 15.10 (Data API, IAM auth, min ACU 0), 4 DynamoDB tables, schema migrator, verifier Lambdas
-- `schema.sql` applied with full RLS baseline (tenant isolation + user PII)
+- `schema.sql` + `migrations/0001-onboarding-rls.sql` applied (15 RLS policies, 10 tables)
 
-What is NOT included yet (Slice 3+):
+What is code-complete but not yet deployed (Slice 3):
 
-- Cognito User Pool, API Gateway, public endpoints — Slice 3
-- Domain Lambda handlers under `apps/` — Slice 3
-- RDS Proxy — Slice 4 (added when Lambda volume warrants pooling)
-- NAT Gateway — Slice 4 (needed for CODEF outbound)
+- `Ym-Dev-Identity` — Cognito User Pool + Client
+- `Ym-Dev-Api` — HTTP API Gateway, JWT Authorizer, Identity Lambda (VPC)
+- `apps/identity` — hexagonal domain package (`/me`, `/tenants`, `/me/tenants`, `/health`)
+- 6 KMS CMKs total across stacks (see `PLAN.md §4.4` for inventory)
+
+What is NOT included yet (Slice 4+):
+
+- RDS Proxy — Slice 4 (connection pooling when Lambda volume warrants)
+- NAT Gateway decision — Slice 4 (needed for CODEF outbound; NAT GW vs NAT instance vs PrivateLink)
+- `POST /tenants` Idempotency-Key (DynamoDB 24h response replay) — Slice 4
+- First journal-entry domain Lambda — Slice 4
+- Master secret rotation — Slice 4 (with RDS Proxy)
 - CODEF API integration — Slice 4+
 
 ## Local Development
@@ -97,7 +106,8 @@ AWS_PROFILE=ym-dev aws secretsmanager put-secret-value \
 ## Open Items
 
 - **Account isolation**: single AWS account with `Ym-Dev-*` / `Ym-Prod-*` prefixes. PLAN.md §5.2 recommends account-level separation; revisit before Phase 1.
-- **NAT Gateway decision**: Slice 4 chooses between NAT Gateway ($32+), `t4g.nano` NAT instance (~$3.5/mo), or PrivateLink for CODEF.
+- **NAT Gateway decision**: Slice 4 chooses between NAT Gateway ($32+/mo), `t4g.nano` NAT instance (~$3.5/mo), or PrivateLink for CODEF.
+- **Master secret rotation**: deferred to Slice 4 (with RDS Proxy).
 - **Bedrock model access**: enable `anthropic.claude-sonnet-4` and `anthropic.claude-opus-4` in `ap-northeast-2` before Slice 5.
 - **Domain & Route53**: not configured. Decide before exposing public endpoints.
-- **Master secret rotation**: deferred to Slice 4 (with RDS Proxy).
+- **CDK Pipelines**: local `cdk deploy` only. GitHub Actions pipeline deferred to Phase 1.
