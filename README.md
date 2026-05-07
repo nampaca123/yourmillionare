@@ -6,9 +6,13 @@ AWS cloud-native AI accounting agent for early-stage Korean startups. See `PLAN.
 
 ```
 yourmillionare/
-├── infrastructure/   # CDK TypeScript app (Slices 1–3 code complete; 1–2 deployed)
-├── apps/             # Hexagonal application code (identity domain, Slice 3+)
-├── docs/             # Slice implementation reports (01–03)
+├── infrastructure/   # CDK TypeScript app (Slices 1–4 code complete)
+├── apps/
+│   ├── identity/     # Cognito user / tenant domain (Slice 3)
+│   └── journal/      # AI accounting journal domain (Slice 4)
+├── packages/
+│   └── shared-errors/ # AppError hierarchy + toHttpErrorResponse (Slice 4)
+├── docs/             # Slice implementation reports (01–04)
 ├── PLAN.md           # Product and architecture plan
 ├── schema.sql        # Aurora PostgreSQL DDL baseline (Slice 2); see migrations/ for Slice 3+
 └── CLAUDE.md         # Engineering guidelines
@@ -35,19 +39,20 @@ CODEF_CLIENT_SECRET=...
 CODEF_PUBLIC_KEY=...
 ```
 
-## Slice 3 Status — Identity & API (code complete, deploy pending)
+## Slice 4 Status — NAT + Journal PoC (deploying)
 
-`Ym-Dev-Foundation`, `Ym-Dev-Network`, `Ym-Dev-Data` deployed to `ap-northeast-2` (account 823401933116).
-`Ym-Dev-Identity`, `Ym-Dev-Api` code complete — **not yet deployed**.
+All stacks deployed to `ap-northeast-2` (account 823401933116).
 
-What is deployed (Slices 1–2):
+What is deployed (Slices 1–3):
 
 - `Ym-Dev-Foundation` — shared KMS CMK + CODEF credentials secret slot
-- `Ym-Dev-Network` — VPC (6 subnets, no NAT), security groups, VPC endpoints (KMS/SM interface, S3/DDB gateway), Flow Logs
-- `Ym-Dev-Data` — Aurora Serverless v2 PG 15.10 (Data API, IAM auth, min ACU 0), 4 DynamoDB tables, schema migrator, verifier Lambdas
-- `schema.sql` + `migrations/0001-onboarding-rls.sql` applied (15 RLS policies, 10 tables)
+- `Ym-Dev-Network` — VPC (7 subnets incl. PRIVATE_WITH_EGRESS), t4g.nano NAT Instance (fck-nat), security groups, VPC endpoints, Flow Logs
+- `Ym-Dev-Data` — Aurora Serverless v2 PG 15.10, 4 DynamoDB tables, schema migrator (baseline-v1), HostedRotation
+- `schema.sql` + migrations 0001 (RLS) + 0002 applied
+- `Ym-Dev-Identity` — Cognito User Pool + Client
+- `Ym-Dev-Api` — HTTP API, JWT Authorizer, Identity Lambda + Journal Lambda
 
-What is code-complete but not yet deployed (Slice 3):
+What is code-complete (Slice 4):
 
 - `Ym-Dev-Identity` — Cognito User Pool + Client
 - `Ym-Dev-Api` — HTTP API Gateway, JWT Authorizer, Identity Lambda (VPC)

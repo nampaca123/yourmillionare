@@ -1,7 +1,7 @@
 // Data stack: Aurora Serverless v2, DynamoDB tables, schema migrator, and verifier custom resources.
 
 import { createHash } from 'crypto';
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -10,6 +10,7 @@ import type { StackProps } from 'aws-cdk-lib';
 import type { ISecurityGroup, IVpc } from 'aws-cdk-lib/aws-ec2';
 import { SubnetType } from 'aws-cdk-lib/aws-ec2';
 import type { IKey } from 'aws-cdk-lib/aws-kms';
+import { HostedRotation } from 'aws-cdk-lib/aws-secretsmanager';
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
@@ -27,19 +28,33 @@ export interface DataStackProps extends StackProps {
   readonly lambdaSg: ISecurityGroup;
   readonly auroraSg: ISecurityGroup;
   readonly sharedKey: IKey;
+  readonly availabilityZones: string[];
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCHEMA_PATH = join(__dirname, '../../../schema.sql');
 const BOOTSTRAP_PATH = join(__dirname, 'data/sql/db-bootstrap.sql');
+const MIGRATIONS_DIR = join(__dirname, 'data/sql/migrations');
 const LAMBDA_ENTRY = (file: string) => join(__dirname, `data/${file}`);
 
 function sha256(content: Buffer): string {
   return createHash('sha256').update(content).digest('hex');
 }
 
+function migrationsSha256(): string {
+  let files: string[] = [];
+  try {
+    files = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.sql')).sort();
+  } catch {
+    return 'no-migrations';
+  }
+  const combined = files.map((f) => `${f}:${sha256(readFileSync(join(MIGRATIONS_DIR, f)))}`).join('|');
+  return createHash('sha256').update(combined).digest('hex');
+}
+
 export class DataStack extends Stack {
   public readonly aurora: AuroraConstruct;
+  public readonly cache: CacheConstruct;
 
   constructor(scope: Construct, id: string, props: DataStackProps) {
     super(scope, id, props);
@@ -58,7 +73,7 @@ export class DataStack extends Stack {
     const aurora = this.aurora;
 
     // --- DynamoDB tables ---
-    const cache = new CacheConstruct(this, 'Cache', {
+    this.cache = new CacheConstruct(this, 'Cache', {
       deploymentEnv: props.deploymentEnv,
       sharedKey: props.sharedKey,
     });
@@ -70,15 +85,32 @@ export class DataStack extends Stack {
           reason: 'Cache tables disable PITR in dev for cost savings; cache data is ephemeral and can be regenerated from Aurora.',
         },
       ];
-      NagSuppressions.addResourceSuppressions(cache.monthlySummaryCache, ddb3Suppression);
-      NagSuppressions.addResourceSuppressions(cache.transactionCache, ddb3Suppression);
-      NagSuppressions.addResourceSuppressions(cache.idempotencyKeys, ddb3Suppression);
-      NagSuppressions.addResourceSuppressions(cache.costCounter, ddb3Suppression);
+      NagSuppressions.addResourceSuppressions(this.cache.monthlySummaryCache, ddb3Suppression);
+      NagSuppressions.addResourceSuppressions(this.cache.transactionCache, ddb3Suppression);
+      NagSuppressions.addResourceSuppressions(this.cache.idempotencyKeys, ddb3Suppression);
+      NagSuppressions.addResourceSuppressions(this.cache.costCounter, ddb3Suppression);
     }
+
+    // --- Master secret rotation (30-day cycle) ---
+    // Rotation Lambda uses PRIVATE_ISOLATED (no internet needed: SM + KMS endpoints exist).
+    // securityGroups: [lambdaSg] ensures auroraSg ingress rules already allow it on 5432.
+    // azs[0] fixed so the Lambda always hits the same SM/KMS endpoint ENI in dev (1 AZ).
+    const azs = props.availabilityZones;
+    aurora.masterSecret.addRotationSchedule('Rotate', {
+      hostedRotation: HostedRotation.postgreSqlSingleUser({
+        vpc: props.vpc,
+        vpcSubnets: { availabilityZones: [azs[0]], subnetType: SubnetType.PRIVATE_ISOLATED },
+        securityGroups: [props.lambdaSg],
+        // Explicit short name to stay within Lambda's 64-char function name limit
+        functionName: `${this.stackName}-AuroraRotation`,
+      }),
+      automaticallyAfter: Duration.days(30),
+    });
 
     // --- Schema migrator Lambda (no VPC, Data API) ---
     const schemaSha256 = sha256(readFileSync(SCHEMA_PATH));
     const bootstrapSha256 = sha256(readFileSync(BOOTSTRAP_PATH));
+    const migrationsHash = migrationsSha256();
 
     const migratorFn = new NodejsFunction(this, 'SchemaMigratorFn', {
       entry: LAMBDA_ENTRY('schema-migrator.lambda.ts'),
@@ -119,9 +151,11 @@ export class DataStack extends Stack {
     const migratorProvider = new Provider(this, 'SchemaMigratorProvider', {
       onEventHandler: migratorFn,
     });
+    // migrationsSha256 in properties ensures the CR re-runs when any migration file changes.
+    // The Custom Resource is triggered by properties hash changes — asset hash alone is not enough.
     const migrationCR = new CustomResource(this, 'SchemaMigration', {
       serviceToken: migratorProvider.serviceToken,
-      properties: { schemaSha256, bootstrapSha256 },
+      properties: { schemaSha256, bootstrapSha256, migrationsSha256: migrationsHash },
     });
     // Data API requires at least one running DB instance. The cluster resource is created
     // before the writer instance, so we must explicitly wait for the writer.
@@ -326,13 +360,36 @@ export class DataStack extends Stack {
       );
     }
 
+    // HostedRotation Lambda suppressions (AWS-managed, not customer-controlled).
+    // Using stack-level suppression since CDK generates paths for HostedRotation that
+    // vary by CDK version and cannot be reliably referenced by path.
+    NagSuppressions.addStackSuppressions(this, [
+      {
+        id: 'AwsSolutions-L1',
+        reason: 'HostedRotation Lambda runtime is managed by AWS; NODEJS_20_X used for customer Lambdas.',
+      },
+      {
+        id: 'AwsSolutions-IAM4',
+        reason: 'HostedRotation Lambda uses AWS-managed execution roles; not customer-controlled.',
+        appliesTo: [
+          'Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole',
+          'Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole',
+        ],
+      },
+      {
+        id: 'AwsSolutions-IAM5',
+        reason: 'HostedRotation and CDK Provider framework Lambdas use wildcard resources; not customer-controlled.',
+        appliesTo: ['Resource::*'],
+      },
+    ]);
+
     // --- Outputs ---
     new CfnOutput(this, 'AuroraClusterArn', { value: aurora.cluster.clusterArn, exportName: `${id}-AuroraClusterArn` });
     new CfnOutput(this, 'AuroraEndpoint', { value: aurora.cluster.clusterEndpoint.hostname, exportName: `${id}-AuroraEndpoint` });
     new CfnOutput(this, 'AuroraSecretArn', { value: aurora.masterSecret.secretArn, exportName: `${id}-AuroraSecretArn` });
-    new CfnOutput(this, 'MonthlySummaryCacheArn', { value: cache.monthlySummaryCache.tableArn });
-    new CfnOutput(this, 'TransactionCacheArn', { value: cache.transactionCache.tableArn });
-    new CfnOutput(this, 'IdempotencyKeysArn', { value: cache.idempotencyKeys.tableArn });
-    new CfnOutput(this, 'CostCounterArn', { value: cache.costCounter.tableArn });
+    new CfnOutput(this, 'MonthlySummaryCacheArn', { value: this.cache.monthlySummaryCache.tableArn });
+    new CfnOutput(this, 'TransactionCacheArn', { value: this.cache.transactionCache.tableArn });
+    new CfnOutput(this, 'IdempotencyKeysArn', { value: this.cache.idempotencyKeys.tableArn });
+    new CfnOutput(this, 'CostCounterArn', { value: this.cache.costCounter.tableArn });
   }
 }

@@ -8,7 +8,8 @@
   },
   "workspaces": [
     "infrastructure",
-    "apps/*"
+    "apps/*",
+    "packages/*"
   ],
   "scripts": {
     "synth": "npm run synth --workspace=@ym/infrastructure",

@@ -1,15 +1,22 @@
-// Network stack: VPC, security groups, VPC endpoints, and Flow Logs for all downstream stacks.
+// Network stack: VPC, security groups, VPC endpoints, Flow Logs, and NAT Instance for all downstream stacks.
 
 import { CfnOutput, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import type { StackProps } from 'aws-cdk-lib';
 import {
+  CfnInstance,
   FlowLog,
   FlowLogDestination,
   FlowLogResourceType,
   FlowLogTrafficType,
   GatewayVpcEndpointAwsService,
+  Instance,
+  InstanceClass,
+  InstanceSize,
+  InstanceType,
   InterfaceVpcEndpointAwsService,
   IpAddresses,
+  NatProvider,
+  NatTrafficDirection,
   Port,
   SecurityGroup,
   SubnetType,
@@ -18,10 +25,16 @@ import {
 import { Key } from 'aws-cdk-lib/aws-kms';
 import { PolicyStatement, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
 import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
+import { Runtime } from 'aws-cdk-lib/aws-lambda';
+import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { NagSuppressions } from 'cdk-nag';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import type { Construct } from 'constructs';
 
 import type { DeploymentEnv } from '../config/env.config.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export interface NetworkStackProps extends StackProps {
   readonly deploymentEnv: DeploymentEnv;
@@ -41,9 +54,6 @@ export class NetworkStack extends Stack {
     const vpcCidr = props.vpcCidr ?? '10.20.0.0/16';
     const azs = props.availabilityZones;
 
-    // Local CMK for Flow Logs. CloudWatch Logs requires an explicit KMS key policy grant
-    // allowing the logs service principal — using a cross-stack key would force a
-    // Foundation → Network dependency cycle. Local key avoids that.
     const flowLogsKey = new Key(this, 'FlowLogsKey', {
       description: 'Ym Network Flow Logs CMK',
       enableKeyRotation: true,
@@ -62,20 +72,40 @@ export class NetworkStack extends Stack {
       }),
     );
 
-    // 3 PUBLIC + 3 PRIVATE_ISOLATED subnets, no NAT in Slice 2.
-    // PRIVATE_WITH_EGRESS is deferred to Slice 4 together with the NAT decision.
+    // t4g.nano fck-nat: ~$3.5/mo dev, ~$10.5/mo prod (vs NAT Gateway ~$33/mo).
+    // NatProvider.instanceV2 uses the fck-nat AMI with ARM64 support.
+    // In dev: 1 NAT instance in azs[0] only (SPOF accepted).
+    // In prod: 3 NAT instances, one per AZ.
+    const natProvider = NatProvider.instanceV2({
+      instanceType: InstanceType.of(InstanceClass.T4G, InstanceSize.NANO),
+      defaultAllowedTraffic: NatTrafficDirection.INBOUND_AND_OUTBOUND,
+    });
+
     this.vpc = new Vpc(this, 'Vpc', {
       ipAddresses: IpAddresses.cidr(vpcCidr),
       availabilityZones: azs,
-      natGateways: 0,
+      natGateways: isProd ? 3 : 1,
+      natGatewayProvider: natProvider,
+      // Order matters for CIDR allocation. isolated must stay at indices 3-5 (10.20.3-5.0/24)
+      // to avoid replacing the existing Aurora subnets. egress gets 10.20.6-8.0/24.
       subnetConfiguration: [
         { name: 'public', subnetType: SubnetType.PUBLIC, cidrMask: 24 },
         { name: 'isolated', subnetType: SubnetType.PRIVATE_ISOLATED, cidrMask: 24 },
+        { name: 'egress', subnetType: SubnetType.PRIVATE_WITH_EGRESS, cidrMask: 24 },
       ],
     });
 
-    // VPC Flow Logs — enables AwsSolutions-VPC7, encrypted with local CMK.
-    // Slice 4 cost gate: re-evaluate S3 destination ($0.25/GB) vs CW ($0.50/GB).
+    // Enforce IMDSv2 on all NAT instances (AwsSolutions-EC29 compliance).
+    // natProvider.gatewayInstances is populated by Vpc constructor above.
+    const natInstances = (natProvider as unknown as { gatewayInstances: Instance[] }).gatewayInstances;
+    for (const inst of natInstances) {
+      const cfnInst = inst.node.defaultChild as CfnInstance;
+      cfnInst.addPropertyOverride('MetadataOptions', {
+        HttpTokens: 'required',
+        HttpPutResponseHopLimit: 2,
+      });
+    }
+
     const flowLogsGroup = new LogGroup(this, 'FlowLogsGroup', {
       encryptionKey: flowLogsKey,
       retention: isProd ? RetentionDays.THREE_MONTHS : RetentionDays.TWO_WEEKS,
@@ -87,14 +117,12 @@ export class NetworkStack extends Stack {
       destination: FlowLogDestination.toCloudWatchLogs(flowLogsGroup),
     });
 
-    // sg-lambda: for Slice 3+ app Lambdas. Not consumed in Slice 2 (migrator/verifier are out-of-VPC).
     this.lambdaSg = new SecurityGroup(this, 'LambdaSg', {
       vpc: this.vpc,
       description: 'Slice 3+ application Lambda functions.',
       allowAllOutbound: true,
     });
 
-    // sg-aurora: only accepts 5432 from sg-lambda, no CIDR ingress.
     this.auroraSg = new SecurityGroup(this, 'AuroraSg', {
       vpc: this.vpc,
       description: 'Aurora Serverless v2 cluster.',
@@ -102,9 +130,6 @@ export class NetworkStack extends Stack {
     });
     this.auroraSg.addIngressRule(this.lambdaSg, Port.tcp(5432), 'Lambdas on 5432');
 
-    // Interface endpoints — 1 AZ in dev (cost: 2 ENI × $0.01/h = ~$14.6/mo),
-    // 3 AZ in prod (6 ENI, ~$43.8/mo). secretsmanager and kms only.
-    // azs[0] comes from props (no context lookup) so this is safe at synth time.
     const endpointSubnets = isProd
       ? { subnetType: SubnetType.PRIVATE_ISOLATED }
       : { availabilityZones: [azs[0]], subnetType: SubnetType.PRIVATE_ISOLATED };
@@ -120,7 +145,6 @@ export class NetworkStack extends Stack {
       privateDnsEnabled: true,
     });
 
-    // Gateway endpoints — always free.
     this.vpc.addGatewayEndpoint('S3Endpoint', {
       service: GatewayVpcEndpointAwsService.S3,
     });
@@ -128,10 +152,22 @@ export class NetworkStack extends Stack {
       service: GatewayVpcEndpointAwsService.DYNAMODB,
     });
 
+    // Standalone Lambda for manual egress verification: invoke it and check publicIp in response.
+    // aws lambda invoke --function-name <fn-name> --payload '{}' /tmp/out.json
+    const egressVerifierFn = new NodejsFunction(this, 'EgressVerifierFn', {
+      entry: join(__dirname, 'network/egress-verifier.lambda.ts'),
+      handler: 'handler',
+      runtime: Runtime.NODEJS_20_X,
+      vpc: this.vpc,
+      vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [this.lambdaSg],
+    });
+
     new CfnOutput(this, 'VpcId', { value: this.vpc.vpcId, exportName: `${id}-VpcId` });
     new CfnOutput(this, 'LambdaSgId', { value: this.lambdaSg.securityGroupId, exportName: `${id}-LambdaSgId` });
     new CfnOutput(this, 'AuroraSgId', { value: this.auroraSg.securityGroupId, exportName: `${id}-AuroraSgId` });
     new CfnOutput(this, 'FlowLogsGroupArn', { value: flowLogsGroup.logGroupArn, exportName: `${id}-FlowLogsGroupArn` });
+    new CfnOutput(this, 'EgressVerifierFnName', { value: egressVerifierFn.functionName });
 
     NagSuppressions.addResourceSuppressions(flowLogsKey, [
       {
@@ -139,6 +175,34 @@ export class NetworkStack extends Stack {
         reason: 'Flow Logs CMK has key rotation enabled; this suppression covers any remaining KMS rule.',
       },
     ]);
+
+    // NAT instance security group allows 0.0.0.0/0 inbound (required for NAT forwarding)
+    NagSuppressions.addResourceSuppressionsByPath(
+      this,
+      `/${id}/Vpc/NatSecurityGroup/Resource`,
+      [{ id: 'AwsSolutions-EC23', reason: 'NAT instance SG requires 0.0.0.0/0 inbound to forward traffic from private subnets.' }],
+    );
+
+    // NAT instance EBS and monitoring suppressions
+    NagSuppressions.addResourceSuppressionsByPath(
+      this,
+      `/${id}/Vpc/publicSubnet1/NatInstance/Resource`,
+      [
+        { id: 'AwsSolutions-EC26', reason: 'fck-nat AMI root volume — KMS EBS encryption deferred; instance is stateless (no sensitive data on disk).' },
+        { id: 'AwsSolutions-EC28', reason: 'dev NAT instance — detailed monitoring enabled in prod via CloudWatch alarm.' },
+        { id: 'AwsSolutions-EC29', reason: 'IMDSv2 enforced via addPropertyOverride on CfnInstance MetadataOptions.' },
+      ],
+    );
+
+    // Egress verifier Lambda nag suppressions
+    NagSuppressions.addResourceSuppressions(egressVerifierFn, [
+      { id: 'AwsSolutions-L1', reason: 'NODEJS_20_X is current LTS; upgrading to 22_X deferred to Slice 5.' },
+    ], true);
+    NagSuppressions.addResourceSuppressionsByPath(
+      this,
+      `/${id}/EgressVerifierFn/ServiceRole/Resource`,
+      [{ id: 'AwsSolutions-IAM4', reason: 'AWSLambdaVPCAccessExecutionRole is required for VPC Lambda.' }],
+    );
 
     const endpointNagSuppression = [
       {

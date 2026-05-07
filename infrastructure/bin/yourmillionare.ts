@@ -47,6 +47,7 @@ const data = new DataStack(app, `${config.stackPrefix}-Data`, {
   lambdaSg: network.lambdaSg,
   auroraSg: network.auroraSg,
   sharedKey: foundation.sharedKey,
+  availabilityZones: [`${config.region}a`, `${config.region}b`, `${config.region}c`],
 });
 data.addDependency(network);
 data.addDependency(foundation);
@@ -63,6 +64,7 @@ const api = new ApiStack(app, `${config.stackPrefix}-Api`, {
   vpc: network.vpc,
   lambdaSg: network.lambdaSg,
   aurora: data.aurora,
+  cache: data.cache,
   identity,
   sharedKey: foundation.sharedKey,
 });

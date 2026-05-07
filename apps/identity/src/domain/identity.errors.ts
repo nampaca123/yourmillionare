@@ -1,6 +1,6 @@
 // Domain errors for the identity bounded context.
 
-import { ConflictError, NotFoundError, ValidationError } from '../shared/errors/app-error.js';
+import { AppError, ConflictError, NotFoundError, ValidationError } from '../shared/errors/app-error.js';
 
 export class UserAlreadyExistsError extends ConflictError {
   constructor(cognitoSub: string) {
@@ -14,9 +14,9 @@ export class TenantNotFoundError extends NotFoundError {
   }
 }
 
-export class DuplicateBizRegNoError extends ConflictError {
+export class DuplicateBizRegNoError extends AppError {
   constructor() {
-    super('A tenant with this business registration number already exists');
+    super(409, 'BIZ_REG_NO_TAKEN', 'Business registration number is already registered.', 'Duplicate biz_reg_no on tenant creation');
   }
 }
 

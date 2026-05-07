@@ -176,16 +176,49 @@ async function recordVersion(
   );
 }
 
+const RESUME_RETRY_DELAY_MS = 15_000;
+const RESUME_MAX_RETRIES = 8;
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isDatabaseResuming(err: unknown): boolean {
+  if (err instanceof Error) {
+    const name = (err as { name?: string }).name ?? '';
+    return name === 'DatabaseResumingException' || name === 'CommunicationsErrorException';
+  }
+  return false;
+}
+
+async function withResumeRetry<T>(fn: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; attempt <= RESUME_MAX_RETRIES; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (isDatabaseResuming(err) && attempt < RESUME_MAX_RETRIES) {
+        console.info(JSON.stringify({ message: 'Aurora resuming, retrying', attempt, delayMs: RESUME_RETRY_DELAY_MS }));
+        await sleep(RESUME_RETRY_DELAY_MS);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('Unreachable');
+}
+
 async function runInTransaction(
   client: RDSDataClient,
   work: (txId: string) => Promise<void>,
 ): Promise<void> {
-  const { transactionId } = await client.send(
-    new BeginTransactionCommand({
-      resourceArn: CLUSTER_ARN,
-      secretArn: SECRET_ARN,
-      database: DATABASE,
-    }),
+  const { transactionId } = await withResumeRetry(() =>
+    client.send(
+      new BeginTransactionCommand({
+        resourceArn: CLUSTER_ARN,
+        secretArn: SECRET_ARN,
+        database: DATABASE,
+      }),
+    ),
   );
   if (!transactionId) throw new Error('Failed to begin transaction');
 
@@ -218,19 +251,43 @@ export const handler = async (event: CfnEvent): Promise<CfnResult> => {
   const bootstrapSql = readFileSync(join(__dirname, 'db-bootstrap.sql'), 'utf8');
   const schemaSql = readFileSync(join(__dirname, 'schema.sql'), 'utf8');
 
-  const baseVersion = sha256Hex(bootstrapSql + schemaSql);
   const client = new RDSDataClient({ region: REGION });
+
+  // 'baseline-v1' is the stable canonical key. Legacy deployments recorded the sha256 hash
+  // of (bootstrapSql + schemaSql) as the version. Both patterns are recognised to avoid
+  // re-running schema.sql on a DB that was already initialised with a different schema.sql hash.
+  const BASELINE_KEY = 'baseline-v1';
+  const legacyVersion = sha256Hex(bootstrapSql + schemaSql);
 
   // --- Phase 1: bootstrap + base schema (single transaction) ---
   await runInTransaction(client, async (txId) => {
     await execStatements(client, splitStatements(bootstrapSql), txId);
 
-    if (await isVersionApplied(client, baseVersion, txId)) {
+    const newKeyApplied = await isVersionApplied(client, BASELINE_KEY, txId);
+
+    // Legacy deployments stored sha256(bootstrapSql + schemaSql) as the version key (64-char hex).
+    // Accept any such entry as proof that the baseline was already applied, regardless of which
+    // exact hash was recorded (covers schema.sql edits between deployments).
+    const legacyResult = await client.send(
+      new ExecuteStatementCommand({
+        resourceArn: CLUSTER_ARN,
+        secretArn: SECRET_ARN,
+        database: DATABASE,
+        transactionId: txId,
+        sql: "SELECT 1 FROM schema_migrations WHERE length(version) = 64 LIMIT 1",
+      }),
+    );
+    const legacyKeyApplied = (legacyResult.records?.length ?? 0) > 0;
+
+    if (newKeyApplied || legacyKeyApplied) {
+      if (!newKeyApplied) {
+        await recordVersion(client, BASELINE_KEY, legacyVersion, txId);
+      }
       return;
     }
 
     await execStatements(client, splitStatements(schemaSql), txId);
-    await recordVersion(client, baseVersion, baseVersion, txId);
+    await recordVersion(client, BASELINE_KEY, legacyVersion, txId);
   });
 
   // --- Phase 2: incremental migrations, one transaction per file ---
@@ -268,7 +325,7 @@ export const handler = async (event: CfnEvent): Promise<CfnResult> => {
   return {
     PhysicalResourceId: PHYSICAL_ID,
     Data: {
-      BaseVersion: baseVersion,
+      BaseVersion: BASELINE_KEY,
       MigrationsApplied: applied.join(','),
       MigrationsSkipped: skipped.join(','),
     },

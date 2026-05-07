@@ -1,4 +1,4 @@
-// API stack: HTTP API Gateway + JWT Authorizer (ID Token) + Identity Lambda in VPC.
+// API stack: HTTP API Gateway + JWT Authorizer (ID Token) + Identity/Journal Lambdas in VPC.
 
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -21,6 +21,7 @@ import type { Construct } from 'constructs';
 
 import type { DeploymentEnv } from '../config/env.config.js';
 import type { AuroraConstruct } from './data/aurora.construct.js';
+import type { CacheConstruct } from './data/cache.construct.js';
 import type { IdentityStack } from './identity.stack.js';
 
 export interface ApiStackProps extends StackProps {
@@ -28,12 +29,15 @@ export interface ApiStackProps extends StackProps {
   readonly vpc: IVpc;
   readonly lambdaSg: ISecurityGroup;
   readonly aurora: AuroraConstruct;
+  readonly cache: CacheConstruct;
   readonly identity: IdentityStack;
   readonly sharedKey: IKey;
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const IDENTITY_LAMBDA_ENTRY = join(__dirname, '../../../apps/identity/src/infrastructure/inbound/http/identity.lambda.ts');
+const JOURNAL_LAMBDA_ENTRY = join(__dirname, '../../../apps/journal/src/infrastructure/inbound/http/journal.lambda.ts');
+const BEDROCK_PROFILE_ID = 'global.anthropic.claude-sonnet-4-6';
 
 export class ApiStack extends Stack {
   public readonly httpApi: HttpApi;
@@ -82,10 +86,11 @@ export class ApiStack extends Stack {
         LOG_LEVEL: isProd ? 'info' : 'debug',
         KMS_BIZREG_KEY_ARN: bizRegKey.keyArn,
         KMS_BIZREG_HMAC_KEY_ARN: bizRegHmacKey.keyArn,
+        IDEMPOTENCY_TABLE_NAME: props.cache.idempotencyKeys.tableName,
       },
       bundling: {
         externalModules: ['@aws-sdk/*', 'pg-native'],
-        nodeModules: ['pg'],
+        nodeModules: ['pg', '@aws-lambda-powertools/idempotency'],
       },
     });
 
@@ -101,6 +106,56 @@ export class ApiStack extends Stack {
 
     bizRegKey.grantEncryptDecrypt(identityFn);
     bizRegHmacKey.grant(identityFn, 'kms:GenerateMac', 'kms:VerifyMac');
+    props.cache.idempotencyKeys.grantReadWriteData(identityFn);
+
+    // --- Journal Lambda ---
+    // PRIVATE_WITH_EGRESS subnet is required: Bedrock API calls need outbound internet via NAT.
+    const journalFn = new NodejsFunction(this, 'JournalFn', {
+      entry: JOURNAL_LAMBDA_ENTRY,
+      handler: 'handler',
+      runtime: Runtime.NODEJS_20_X,
+      architecture: Architecture.ARM_64,
+      memorySize: 512,
+      timeout: Duration.seconds(30),
+      vpc: props.vpc,
+      vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [props.lambdaSg],
+      environment: {
+        CLUSTER_ENDPOINT: props.aurora.cluster.clusterEndpoint.hostname,
+        CLUSTER_PORT: '5432',
+        DATABASE_NAME: 'yourmillionare',
+        APP_REGION: region,
+        LOG_LEVEL: isProd ? 'info' : 'debug',
+        BEDROCK_MODEL_ID: BEDROCK_PROFILE_ID,
+        BEDROCK_DAILY_LIMIT_PER_USER: '100',
+        COST_COUNTER_TABLE_NAME: props.cache.costCounter.tableName,
+        IDEMPOTENCY_TABLE_NAME: props.cache.idempotencyKeys.tableName,
+      },
+      bundling: {
+        externalModules: ['@aws-sdk/*', 'pg-native'],
+        nodeModules: ['pg', '@aws-lambda-powertools/idempotency'],
+      },
+    });
+
+    journalFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['rds-db:connect'],
+        resources: [
+          `arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`,
+        ],
+      }),
+    );
+    journalFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['bedrock:InvokeModel', 'bedrock:Converse'],
+        resources: [
+          `arn:aws:bedrock:${region}:${account}:inference-profile/${BEDROCK_PROFILE_ID}`,
+          'arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6',
+        ],
+      }),
+    );
+    props.cache.costCounter.grantReadWriteData(journalFn);
+    props.cache.idempotencyKeys.grantReadWriteData(journalFn);
 
     // --- HTTP API ---
     const jwtAuthorizer = new HttpJwtAuthorizer('JwtAuthorizer', props.identity.issuerUrl, {
@@ -130,16 +185,17 @@ export class ApiStack extends Stack {
       });
     }
 
-    const integration = new HttpLambdaIntegration('IdentityIntegration', identityFn);
+    const identityIntegration = new HttpLambdaIntegration('IdentityIntegration', identityFn);
+    const journalIntegration = new HttpLambdaIntegration('JournalIntegration', journalFn);
 
     // GET /health — no authorizer (intentional liveness probe)
     this.httpApi.addRoutes({
       path: '/health',
       methods: [HttpMethod.GET],
-      integration,
+      integration: identityIntegration,
     });
 
-    // Authenticated routes
+    // Identity authenticated routes
     for (const [method, path] of [
       [HttpMethod.GET, '/me'],
       [HttpMethod.POST, '/tenants'],
@@ -148,7 +204,20 @@ export class ApiStack extends Stack {
       this.httpApi.addRoutes({
         path,
         methods: [method],
-        integration,
+        integration: identityIntegration,
+        authorizer: jwtAuthorizer,
+      });
+    }
+
+    // Journal authenticated routes (path-scoped per tenant)
+    for (const [method, path] of [
+      [HttpMethod.POST, '/tenants/{tenantId}/journal/classify'],
+      [HttpMethod.POST, '/tenants/{tenantId}/journal/entries'],
+    ] as [HttpMethod, string][]) {
+      this.httpApi.addRoutes({
+        path,
+        methods: [method],
+        integration: journalIntegration,
         authorizer: jwtAuthorizer,
       });
     }
@@ -195,6 +264,38 @@ export class ApiStack extends Stack {
         {
           id: 'AwsSolutions-IAM5',
           reason: 'kms:ReEncrypt* and kms:GenerateDataKey* are added by CDK grantEncryptDecrypt; scoped to BizRegNo key',
+          appliesTo: ['Action::kms:ReEncrypt*', 'Action::kms:GenerateDataKey*'],
+        },
+      ],
+      true,
+    );
+
+    NagSuppressions.addResourceSuppressions(
+      journalFn,
+      [
+        {
+          id: 'AwsSolutions-L1',
+          reason: 'NODEJS_20_X is current LTS; 22_X adoption deferred to Slice 5',
+        },
+        {
+          id: 'AwsSolutions-IAM4',
+          reason: 'AWSLambdaVPCAccessExecutionRole + AWSLambdaBasicExecutionRole required for VPC Lambda',
+          appliesTo: [
+            'Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole',
+            'Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole',
+          ],
+        },
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'rds-db:connect scoped to app_user; bedrock foundation-model wildcard required for cross-region inference profile',
+          appliesTo: [
+            'Resource::*',
+            'Resource::arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6',
+          ],
+        },
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'kms:ReEncrypt* and kms:GenerateDataKey* added by CDK grantReadWriteData for DynamoDB CMK; scoped to shared KMS key',
           appliesTo: ['Action::kms:ReEncrypt*', 'Action::kms:GenerateDataKey*'],
         },
       ],
