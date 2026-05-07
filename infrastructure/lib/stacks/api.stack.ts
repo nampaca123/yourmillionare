@@ -11,7 +11,7 @@ import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations
 import type { ISecurityGroup, IVpc } from 'aws-cdk-lib/aws-ec2';
 import { SubnetType } from 'aws-cdk-lib/aws-ec2';
 import type { IKey } from 'aws-cdk-lib/aws-kms';
-import { Key } from 'aws-cdk-lib/aws-kms';
+import { Key, KeySpec, KeyUsage } from 'aws-cdk-lib/aws-kms';
 import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
 import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -56,9 +56,10 @@ export class ApiStack extends Stack {
       removalPolicy: isProd ? undefined : undefined,
     });
 
-    const bizRegHmacKey = new Key(this, 'BizRegNoHmacKey', {
+    const bizRegHmacKey = new Key(this, 'BizRegNoHmacSha256Key', {
+      keySpec: KeySpec.HMAC_256,
+      keyUsage: KeyUsage.GENERATE_VERIFY_MAC,
       description: 'HMAC key for biz_reg_no deduplication — do NOT rotate',
-      enableKeyRotation: false,
     });
 
     // --- Access logs ---
@@ -319,7 +320,7 @@ export class ApiStack extends Stack {
       },
       {
         id: 'AwsSolutions-KMS5',
-        reason: 'BizRegNoHmacKey intentionally has key rotation disabled; rotating it would break deterministic HMAC-based deduplication',
+        reason: 'BizRegNo HMAC key is KMS HMAC_256; rotating would break deterministic biz_reg_no_hash',
       },
     ]);
   }

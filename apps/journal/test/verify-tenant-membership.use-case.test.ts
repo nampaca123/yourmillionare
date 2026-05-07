@@ -17,15 +17,21 @@ describe('VerifyTenantMembershipUseCase', () => {
   it('should resolve when user is a member of the tenant', async () => {
     repo.add('tenant-1', 'user-1');
 
-    await expect(useCase.execute({ tenantId: 'tenant-1', userId: 'user-1' })).resolves.toBeUndefined();
+    await expect(
+      useCase.execute({ tenantId: 'tenant-1', userId: 'user-1', cognitoSub: 'sub' }),
+    ).resolves.toBeUndefined();
   });
 
   it('should throw ForbiddenError when user is not a member', async () => {
-    await expect(useCase.execute({ tenantId: 'tenant-1', userId: 'user-1' })).rejects.toBeInstanceOf(ForbiddenError);
+    await expect(
+      useCase.execute({ tenantId: 'tenant-1', userId: 'user-1', cognitoSub: 'sub' }),
+    ).rejects.toBeInstanceOf(ForbiddenError);
   });
 
   it('should throw ForbiddenError when tenant does not exist', async () => {
     repo.add('other-tenant', 'user-1');
-    await expect(useCase.execute({ tenantId: 'nonexistent', userId: 'user-1' })).rejects.toBeInstanceOf(ForbiddenError);
+    await expect(
+      useCase.execute({ tenantId: 'nonexistent', userId: 'user-1', cognitoSub: 'sub' }),
+    ).rejects.toBeInstanceOf(ForbiddenError);
   });
 });

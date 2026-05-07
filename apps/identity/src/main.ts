@@ -35,7 +35,7 @@ const createTenant = new CreateTenantUseCase(tenantRepo, memberRepo, encryptor, 
 const listTenants = new ListMyTenantsUseCase(tenantRepo);
 
 const tenantCreatePersistence = buildPersistenceStore('tenant-create');
-const tenantCreateIdempotencyConfig = buildIdempotencyConfig('headers."Idempotency-Key"');
+const tenantCreateIdempotencyConfig = buildIdempotencyConfig('headers."idempotency-key"');
 
 export const container = {
   routes: {

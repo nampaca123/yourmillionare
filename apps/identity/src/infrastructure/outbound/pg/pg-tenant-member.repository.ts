@@ -14,8 +14,13 @@ interface TenantMemberRow {
 }
 
 export class PgTenantMemberRepository implements TenantMemberRepository {
-  async add(params: { tenantId: string; userId: string; role: TenantRole }): Promise<TenantMember> {
-    return withRlsContext({ userId: params.userId }, async (c: PoolClient) => {
+  async add(params: {
+    tenantId: string;
+    userId: string;
+    role: TenantRole;
+    cognitoSub: string;
+  }): Promise<TenantMember> {
+    return withRlsContext({ userId: params.userId, cognitoSub: params.cognitoSub }, async (c: PoolClient) => {
       const result = await c.query<TenantMemberRow>(
         `INSERT INTO tenant_members (tenant_id, user_id, role)
          VALUES ($1, $2, $3)

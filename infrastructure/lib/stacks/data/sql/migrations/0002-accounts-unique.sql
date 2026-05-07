@@ -1,3 +1,2 @@
--- (tenant_id, code) uniqueness is guaranteed by the PRIMARY KEY on accounts.
--- This file ensures ON CONFLICT (tenant_id, code) works for seed inserts without a named constraint.
+-- Superseded by repository root schema.sql ((tenant_id, code) PK on accounts). Filename kept for incremental migrator bookkeeping.
 SELECT 1;

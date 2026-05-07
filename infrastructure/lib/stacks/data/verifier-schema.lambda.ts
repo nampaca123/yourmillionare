@@ -31,7 +31,8 @@ const EXPECTED_TABLE_COUNT = 10;
 // Removing or renaming any policy causes deployment to fail — intentional regression gate.
 const EXPECTED_POLICIES: ReadonlySet<string> = new Set([
   'users:users_select_by_sub',
-  'users:users_modify_self',
+  'users:users_update_self',
+  'users:users_delete_self',
   'users:users_insert_by_sub',
   'user_profiles:profile_self_only',
   'tenants:tenants_select_by_membership',

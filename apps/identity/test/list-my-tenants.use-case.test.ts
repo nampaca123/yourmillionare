@@ -25,10 +25,24 @@ describe('ListMyTenantsUseCase', () => {
 
   it('should return all tenants the user belongs to when memberships exist', async () => {
     const userId = randomUUID();
-    const t1 = await tenants.create({ legalName: 'A', displayName: 'A', bizRegNoEncrypted: Buffer.from('a'), bizRegNoHash: Buffer.from('hash-a') });
-    const t2 = await tenants.create({ legalName: 'B', displayName: 'B', bizRegNoEncrypted: Buffer.from('b'), bizRegNoHash: Buffer.from('hash-b') });
-    await members.add({ tenantId: t1.id, userId, role: 'owner' });
-    await members.add({ tenantId: t2.id, userId, role: 'owner' });
+    const t1 = await tenants.create({
+      userId,
+      cognitoSub: 'unused',
+      legalName: 'A',
+      displayName: 'A',
+      bizRegNoEncrypted: Buffer.from('a'),
+      bizRegNoHash: Buffer.from('hash-a'),
+    });
+    const t2 = await tenants.create({
+      userId,
+      cognitoSub: 'unused',
+      legalName: 'B',
+      displayName: 'B',
+      bizRegNoEncrypted: Buffer.from('b'),
+      bizRegNoHash: Buffer.from('hash-b'),
+    });
+    await members.add({ tenantId: t1.id, userId, role: 'owner', cognitoSub: 'unused' });
+    await members.add({ tenantId: t2.id, userId, role: 'owner', cognitoSub: 'unused' });
 
     const result = await useCase.execute({ userId });
 
@@ -38,8 +52,15 @@ describe('ListMyTenantsUseCase', () => {
   it('should not return tenants that belong to a different user', async () => {
     const userA = randomUUID();
     const userB = randomUUID();
-    const t = await tenants.create({ legalName: 'A', displayName: 'A', bizRegNoEncrypted: Buffer.from('a'), bizRegNoHash: Buffer.from('hash-x') });
-    await members.add({ tenantId: t.id, userId: userA, role: 'owner' });
+    const t = await tenants.create({
+      userId: userA,
+      cognitoSub: 'unused',
+      legalName: 'A',
+      displayName: 'A',
+      bizRegNoEncrypted: Buffer.from('a'),
+      bizRegNoHash: Buffer.from('hash-x'),
+    });
+    await members.add({ tenantId: t.id, userId: userA, role: 'owner', cognitoSub: 'unused' });
 
     const result = await useCase.execute({ userId: userB });
 

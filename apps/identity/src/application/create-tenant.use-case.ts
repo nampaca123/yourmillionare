@@ -9,6 +9,7 @@ import type { BizRegNoHasher } from './ports/biz-reg-no-hasher.port.js';
 
 export interface CreateTenantInput {
   userId: string;
+  cognitoSub: string;
   legalName: string;
   displayName: string;
   bizRegNoRaw: string;
@@ -38,13 +39,19 @@ export class CreateTenantUseCase {
     // Repository throws ConflictError on unique constraint violation for biz_reg_no_hash.
     const tenant = await this.tenants.create({
       userId: input.userId,
+      cognitoSub: input.cognitoSub,
       legalName: input.legalName,
       displayName: input.displayName,
       bizRegNoEncrypted: encrypted,
       bizRegNoHash: hash,
     });
 
-    await this.members.add({ tenantId: tenant.id, userId: input.userId, role: 'owner' });
+    await this.members.add({
+      tenantId: tenant.id,
+      userId: input.userId,
+      role: 'owner',
+      cognitoSub: input.cognitoSub,
+    });
 
     return { tenant };
   }

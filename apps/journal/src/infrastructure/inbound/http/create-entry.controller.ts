@@ -17,7 +17,7 @@ export const buildCreateEntryController =
     const user = await ensureUser.execute({ cognitoSub: claims.cognitoSub, email: claims.email });
     const tenantId = event.pathParameters?.tenantId ?? '';
 
-    await verifyMembership.execute({ tenantId, userId: user.id });
+    await verifyMembership.execute({ tenantId, userId: user.id, cognitoSub: claims.cognitoSub });
 
     let body: unknown;
     try {

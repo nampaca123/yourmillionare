@@ -11,6 +11,14 @@ interface UserRow {
 export class PgUserRepository implements UserRepository {
   async findOrCreateByCognitoSub(cognitoSub: string, email: string): Promise<{ id: string }> {
     return withRlsContext({ cognitoSub }, async (c: PoolClient) => {
+      const prior = await c.query<{ id: string }>('SELECT id FROM users WHERE cognito_sub = $1', [
+        cognitoSub,
+      ]);
+      const priorId = prior.rows[0]?.id;
+      if (priorId) {
+        await c.query("SELECT set_config('app.current_user_id', $1, true)", [priorId]);
+      }
+
       const result = await c.query<UserRow>(
         `INSERT INTO users (cognito_sub, email)
          VALUES ($1, $2)

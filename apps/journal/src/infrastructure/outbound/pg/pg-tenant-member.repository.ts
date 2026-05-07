@@ -5,8 +5,9 @@ import type { TenantMemberRepository } from '../../../application/ports/tenant-m
 import { withRlsContext } from './pg-rls.context.js';
 
 export class PgTenantMemberRepository implements TenantMemberRepository {
-  async isMember(tenantId: string, userId: string): Promise<boolean> {
-    return withRlsContext({ userId }, async (c: PoolClient) => {
+  async isMember(params: { tenantId: string; userId: string; cognitoSub: string }): Promise<boolean> {
+    const { tenantId, userId, cognitoSub } = params;
+    return withRlsContext({ userId, tenantId, cognitoSub }, async (c: PoolClient) => {
       const result = await c.query(
         'SELECT 1 FROM tenant_members WHERE tenant_id = $1 AND user_id = $2',
         [tenantId, userId],

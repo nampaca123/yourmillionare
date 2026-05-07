@@ -29,6 +29,14 @@ export class PgUserRepository implements UserRepository {
 
   async upsert(params: { cognitoSub: string; email: string }): Promise<User> {
     return withRlsContext({ cognitoSub: params.cognitoSub }, async (c: PoolClient) => {
+      const prior = await c.query<{ id: string }>('SELECT id FROM users WHERE cognito_sub = $1', [
+        params.cognitoSub,
+      ]);
+      const priorId = prior.rows[0]?.id;
+      if (priorId) {
+        await c.query("SELECT set_config('app.current_user_id', $1, true)", [priorId]);
+      }
+
       // GUC sequence: cognito_sub is set by withRlsContext, enabling INSERT policy.
       const result = await c.query<UserRow>(
         `INSERT INTO users (cognito_sub, email)

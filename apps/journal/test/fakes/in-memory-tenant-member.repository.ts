@@ -9,7 +9,9 @@ export class InMemoryTenantMemberRepository implements TenantMemberRepository {
     this.members.push({ tenantId, userId });
   }
 
-  async isMember(tenantId: string, userId: string): Promise<boolean> {
-    return this.members.some((m) => m.tenantId === tenantId && m.userId === userId);
+  async isMember(params: { tenantId: string; userId: string; cognitoSub: string }): Promise<boolean> {
+    return this.members.some(
+      (m) => m.tenantId === params.tenantId && m.userId === params.userId,
+    );
   }
 }

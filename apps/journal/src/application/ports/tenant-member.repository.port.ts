@@ -1,5 +1,5 @@
 // TenantMemberRepository port: verify user membership in a tenant.
 
 export interface TenantMemberRepository {
-  isMember(tenantId: string, userId: string): Promise<boolean>;
+  isMember(params: { tenantId: string; userId: string; cognitoSub: string }): Promise<boolean>;
 }

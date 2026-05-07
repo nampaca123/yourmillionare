@@ -4,6 +4,7 @@ import type { Tenant } from '../../domain/tenant.entity.js';
 
 export interface CreateTenantParams {
   userId: string;
+  cognitoSub: string;
   legalName: string;
   displayName: string;
   bizRegNoEncrypted: Buffer;

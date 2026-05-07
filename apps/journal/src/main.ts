@@ -39,8 +39,8 @@ const createEntryController = buildCreateEntryController(ensureUser, verifyMembe
 
 const classifyPersistence = buildPersistenceStore('journal-classify');
 const classifyIdempotencyConfig = buildIdempotencyConfig(
-  'headers."Idempotency-Key" || ' +
-  "[body.date, to_string(body.amount), body.counterparty, body.memo] | join('#', @)",
+  // HTTP API lowercases headers; body is unparsed JSON string — avoid JMES join on nested nulls.
+  'headers."idempotency-key" || body',
 );
 
 export const container = {

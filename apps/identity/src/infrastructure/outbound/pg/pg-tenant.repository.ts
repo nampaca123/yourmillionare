@@ -30,13 +30,13 @@ const toTenant = (row: TenantRow): Tenant =>
 
 export class PgTenantRepository implements TenantRepository {
   async create(params: CreateTenantParams): Promise<Tenant> {
-    return withRlsContext({ userId: params.userId }, async (c: PoolClient) => {
+    return withRlsContext({ userId: params.userId, cognitoSub: params.cognitoSub }, async (c: PoolClient) => {
       try {
         const result = await c.query<TenantRow>(
-          `INSERT INTO tenants (biz_reg_no_encrypted, biz_reg_no_hash, legal_name, display_name)
-           VALUES ($1, $2, $3, $4)
+          `INSERT INTO tenants (biz_reg_no_encrypted, biz_reg_no_hash, legal_name, display_name, created_by_user_id)
+           VALUES ($1, $2, $3, $4, $5)
            RETURNING id, legal_name, display_name, created_at`,
-          [params.bizRegNoEncrypted, params.bizRegNoHash, params.legalName, params.displayName],
+          [params.bizRegNoEncrypted, params.bizRegNoHash, params.legalName, params.displayName, params.userId],
         );
         const row = result.rows[0];
         if (!row) throw new Error('Tenant insert returned no row');

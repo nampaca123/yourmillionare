@@ -23,7 +23,13 @@ describe('CreateTenantUseCase', () => {
 
   it('should create a tenant and register owner membership when input is valid', async () => {
     const userId = randomUUID();
-    const input = { userId, legalName: '테스트법인', displayName: '테스트', bizRegNoRaw: '1234567890' };
+    const input = {
+      userId,
+      cognitoSub: 'cognito-sub-test',
+      legalName: '테스트법인',
+      displayName: '테스트',
+      bizRegNoRaw: '1234567890',
+    };
 
     const { tenant } = await useCase.execute(input);
 
@@ -34,9 +40,21 @@ describe('CreateTenantUseCase', () => {
 
   it('should throw ConflictError when the same bizRegNo is registered twice', async () => {
     const userId = randomUUID();
-    await useCase.execute({ userId, legalName: 'First', displayName: 'First', bizRegNoRaw: '1234567890' });
+    await useCase.execute({
+      userId,
+      cognitoSub: 'cognito-a',
+      legalName: 'First',
+      displayName: 'First',
+      bizRegNoRaw: '1234567890',
+    });
 
-    const promise = useCase.execute({ userId, legalName: 'Second', displayName: 'Second', bizRegNoRaw: '1234567890' });
+    const promise = useCase.execute({
+      userId,
+      cognitoSub: 'cognito-a',
+      legalName: 'Second',
+      displayName: 'Second',
+      bizRegNoRaw: '1234567890',
+    });
 
     await expect(promise).rejects.toBeInstanceOf(ConflictError);
   });
@@ -44,6 +62,7 @@ describe('CreateTenantUseCase', () => {
   it('should throw InvalidBizRegNoError when the bizRegNo format is wrong', async () => {
     const promise = useCase.execute({
       userId: randomUUID(),
+      cognitoSub: 'cognito-x',
       legalName: 'Bad',
       displayName: 'Bad',
       bizRegNoRaw: 'not-a-number',
@@ -57,6 +76,7 @@ describe('CreateTenantUseCase', () => {
 
     const { tenant } = await useCase.execute({
       userId,
+      cognitoSub: 'cognito-b',
       legalName: 'Corp',
       displayName: 'Corp',
       bizRegNoRaw: '9876543210',

@@ -28,6 +28,7 @@ export const buildCreateTenantController =
 
     const { tenant } = await createTenant.execute({
       userId: user.id,
+      cognitoSub: claims.cognitoSub,
       legalName: parsed.data.legalName,
       displayName: parsed.data.displayName,
       bizRegNoRaw: parsed.data.bizRegNo,
