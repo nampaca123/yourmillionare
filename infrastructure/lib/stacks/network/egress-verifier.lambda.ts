@@ -13,7 +13,7 @@ export const handler = async (): Promise<{ publicIp: string; status: 'ok' }> => 
         try {
           const parsed = JSON.parse(body) as { ip: string };
           resolve(parsed.ip);
-        } catch (e) {
+        } catch {
           reject(new Error(`Failed to parse response: ${body}`));
         }
       });
@@ -23,6 +23,6 @@ export const handler = async (): Promise<{ publicIp: string; status: 'ok' }> => 
     req.end();
   });
 
-  console.info(JSON.stringify({ message: 'NAT egress verified', publicIp }));
+  process.stdout.write(JSON.stringify({ message: 'NAT egress verified', publicIp }) + '\n');
   return { publicIp, status: 'ok' };
 };

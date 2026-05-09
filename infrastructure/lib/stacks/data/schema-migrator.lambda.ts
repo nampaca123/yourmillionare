@@ -197,7 +197,7 @@ async function withResumeRetry<T>(fn: () => Promise<T>): Promise<T> {
       return await fn();
     } catch (err) {
       if (isDatabaseResuming(err) && attempt < RESUME_MAX_RETRIES) {
-        console.info(JSON.stringify({ message: 'Aurora resuming, retrying', attempt, delayMs: RESUME_RETRY_DELAY_MS }));
+        process.stdout.write(JSON.stringify({ message: 'Aurora resuming, retrying', attempt, delayMs: RESUME_RETRY_DELAY_MS }) + '\n');
         await sleep(RESUME_RETRY_DELAY_MS);
         continue;
       }

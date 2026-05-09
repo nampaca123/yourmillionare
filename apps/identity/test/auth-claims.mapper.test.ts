@@ -33,7 +33,6 @@ describe('parseClaims', () => {
   });
 
   it('should throw UnauthorizedError when email is missing', () => {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { email: _, ...claims } = validClaims;
 
     expect(() => parseClaims(claims)).toThrow(UnauthorizedError);
