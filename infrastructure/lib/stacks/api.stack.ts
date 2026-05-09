@@ -204,6 +204,7 @@ export class ApiStack extends Stack {
       [HttpMethod.GET, '/me'],
       [HttpMethod.POST, '/tenants'],
       [HttpMethod.GET, '/me/tenants'],
+      [HttpMethod.POST, '/tenants/{tenantId}/bank-accounts'],
     ] as [HttpMethod, string][]) {
       this.httpApi.addRoutes({
         path,

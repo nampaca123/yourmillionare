@@ -8,9 +8,9 @@
 
 | 구분 | 내용 |
 |------|------|
-| **인프라** | Foundation, Network, Data(Aurora + 마이그레이션 **0006–0008** + DynamoDB), Identity(Cognito), Api(HTTP API + JWT + Identity/Journal Lambda), **Ingestion(CDK 스켈레톤, HTTP 없음)** — `docs/STATUS.md` |
-| **백엔드 앱** | `apps/identity`, `apps/journal`, **`packages/journal-core`**, `packages/shared-errors` |
-| **진행 단계** | Slice 5: journal-core 추출, 캐시 projector, `ai_decisions`·system SELECT RLS·`dispatched_at`, 멱등 예외 매핑·분개 검증 강화 |
+| **인프라** | Foundation, Network, Data(Aurora + 마이그레이션 **0006–0009** + DynamoDB), Identity(Cognito), Api(HTTP API + JWT + Identity/Journal Lambda), **Ingestion(CODEF 실연동, SFN+SQS+Lambda VPC 배포)** — `docs/STATUS.md` |
+| **백엔드 앱** | `apps/identity`, `apps/journal`, `apps/codef`, **`packages/journal-core`**, `packages/shared-errors` |
+| **진행 단계** | Slice 6: CODEF 실연동(SFN→CODEF→SQS→Bedrock→Aurora), `tenant_bank_accounts` 테이블, `POST /tenants/{tenantId}/bank-accounts` API |
 | **공통 인증** | Cognito **ID Token**만 통과 (`aud` = User Pool Client ID). Access Token은 사용하지 않는다. |
 
 라우트는 `infrastructure/lib/stacks/api.stack.ts`에 정의되며, Identity Lambda와 Journal Lambda가 `routeKey`로 분기한다.
@@ -310,6 +310,50 @@ Powertools 예외는 Identity/Journal `main.ts`의 라우트 래퍼에서 위 `A
 
 ---
 
+### 3.7 `POST /tenants/{tenantId}/bank-accounts`
+
+| 항목 | 내용 |
+|------|------|
+| **기능** | 테넌트에 CODEF 수집 대상 **은행 계좌를 등록**한다. 등록된 계좌는 Ingestion 파이프라인(`TenantsListFn → CodefFetchFn`)이 주기적으로 조회하여 거래내역을 수집한다. |
+| **인증** | 필수 (ID Token) |
+| **멱등성** | 없음 — 동일 `(tenantId, organization, accountNumber)` 재등록 시 **409** |
+| **경로 변수** | `tenantId`: UUID 문자열 |
+
+**요청 본문**:
+
+```json
+{
+  "organization": "string, 정확히 4자 — CODEF 기관코드 (예: '0088'=신한, '0020'=우리)",
+  "accountNumber": "string, 1–50자"
+}
+```
+
+**응답 201**:
+
+```json
+{
+  "id": "uuid",
+  "tenantId": "uuid",
+  "organization": "0088",
+  "accountNumber": "110-123-456789",
+  "isActive": true
+}
+```
+
+| 에러 케이스 | HTTP | 코드 | 비고 |
+|-------------|------|------|------|
+| API Gateway JWT 실패 | 401 | (Gateway) | |
+| JWT 클레임 불일치 | 401 | `UNAUTHORIZED` | |
+| 비멤버 테넌트 | 403 | `FORBIDDEN` | `AddBankAccountUseCase` — 해당 테넌트 멤버가 아님 |
+| 본문 JSON 파싱 실패 | 422 | `VALIDATION_ERROR` | |
+| `organization` 4자리 아님 / `accountNumber` 비어 있음 | 422 | `VALIDATION_ERROR` | Zod |
+| 동일 `(tenantId, organization, accountNumber)` 이미 존재 | 409 | `CONFLICT` | DB `23505` unique 위반 |
+| DB 오류 | 500 | `INTERNAL_ERROR` | |
+
+> **파이프라인 연결**: 이 엔드포인트로 계좌를 등록한 뒤 `connectedIds` Secret에 해당 테넌트의 CODEF `connectedId`를 추가해야 `CodefFetchFn`이 실제 거래내역을 수집한다. Ingestion 파이프라인은 HTTP API가 아님 — Step Functions(6시간 주기) + SQS + Lambda로 동작하며, 파이프라인 오류는 `ClassifyDlqDepthAlarm` CloudWatch 알람으로 모니터링한다.
+
+---
+
 ## 4. 애플리케이션 `AppError` 코드 빠른 참조
 
 | code | HTTP | 용도 |
@@ -339,6 +383,7 @@ Powertools 예외는 Identity/Journal `main.ts`의 라우트 래퍼에서 위 `A
 | GET | `/me` | Identity | JWT |
 | POST | `/tenants` | Identity | JWT |
 | GET | `/me/tenants` | Identity | JWT |
+| POST | `/tenants/{tenantId}/bank-accounts` | Identity | JWT |
 | POST | `/tenants/{tenantId}/journal/classify` | Journal | JWT |
 | POST | `/tenants/{tenantId}/journal/entries` | Journal | JWT |
 

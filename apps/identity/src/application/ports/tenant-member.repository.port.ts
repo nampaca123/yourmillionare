@@ -4,4 +4,5 @@ import type { TenantMember, TenantRole } from '../../domain/tenant-member.entity
 
 export interface TenantMemberRepository {
   add(params: { tenantId: string; userId: string; role: TenantRole; cognitoSub: string }): Promise<TenantMember>;
+  isMember(params: { tenantId: string; userId: string; cognitoSub: string }): Promise<boolean>;
 }

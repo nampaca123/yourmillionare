@@ -1,4 +1,4 @@
-// Ingestion stack: CODEF EDA skeleton — SQS classify queue, Step Functions tenant fan-out, Scheduler ticks, FX collector stub.
+// Ingestion stack: CODEF EDA — VPC Lambdas for tenant listing, bank fetch, classification; SQS + SFN + Scheduler.
 
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -7,11 +7,16 @@ import { Duration, Stack } from 'aws-cdk-lib';
 import type { StackProps } from 'aws-cdk-lib';
 import { Alarm, ComparisonOperator, TreatMissingData } from 'aws-cdk-lib/aws-cloudwatch';
 import { SnsAction } from 'aws-cdk-lib/aws-cloudwatch-actions';
+import type { ISecurityGroup, IVpc } from 'aws-cdk-lib/aws-ec2';
+import { SubnetType } from 'aws-cdk-lib/aws-ec2';
 import { Rule, Schedule } from 'aws-cdk-lib/aws-events';
 import { LambdaFunction, SfnStateMachine } from 'aws-cdk-lib/aws-events-targets';
+import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
 import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
+import type { ITable } from 'aws-cdk-lib/aws-dynamodb';
+import { Secret } from 'aws-cdk-lib/aws-secretsmanager';
 import { Topic } from 'aws-cdk-lib/aws-sns';
 import { Queue } from 'aws-cdk-lib/aws-sqs';
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
@@ -20,6 +25,7 @@ import { NagSuppressions } from 'cdk-nag';
 import type { Construct } from 'constructs';
 
 import type { DeploymentEnv } from '../config/env.config.js';
+import type { AuroraConstruct } from './data/aurora.construct.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -28,8 +34,15 @@ const CODEF_FETCH_ENTRY = join(__dirname, '../../../apps/codef/src/infrastructur
 const CLASSIFY_WORKER_ENTRY = join(__dirname, '../../../apps/codef/src/infrastructure/inbound/http/codef-classify-worker.lambda.ts');
 const FX_COLLECTOR_ENTRY = join(__dirname, '../../../apps/fx/src/infrastructure/inbound/fx-collector.lambda.ts');
 
+const BEDROCK_PROFILE_ID = 'global.anthropic.claude-sonnet-4-6';
+
 export interface IngestionStackProps extends StackProps {
   readonly deploymentEnv: DeploymentEnv;
+  readonly vpc: IVpc;
+  readonly lambdaSg: ISecurityGroup;
+  readonly aurora: AuroraConstruct;
+  readonly codefSecretArn: string;
+  readonly transactionCache: ITable;
 }
 
 export class IngestionStack extends Stack {
@@ -37,6 +50,10 @@ export class IngestionStack extends Stack {
     super(scope, id, props);
 
     const isProd = props.deploymentEnv === 'prod';
+    const region = Stack.of(this).region;
+    const account = Stack.of(this).account;
+
+    const codefSecret = Secret.fromSecretCompleteArn(this, 'CodefSecretRef', props.codefSecretArn);
 
     const classifyDlq = new Queue(this, 'ClassifyDLQ', {
       retentionPeriod: Duration.days(14),
@@ -64,6 +81,33 @@ export class IngestionStack extends Stack {
       displayName: `${id} ingestion alarms`,
     });
 
+    const commonVpcConfig = {
+      vpc: props.vpc,
+      vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [props.lambdaSg],
+    };
+
+    const commonEnv = {
+      CLUSTER_ENDPOINT: props.aurora.cluster.clusterEndpoint.hostname,
+      CLUSTER_PORT: '5432',
+      DATABASE_NAME: 'yourmillionare',
+      APP_REGION: region,
+      SYSTEM_USER_UUID: '00000000-0000-0000-0000-000000000001',
+      LOG_LEVEL: isProd ? 'info' : 'debug',
+    };
+
+    const commonBundling = {
+      externalModules: ['@aws-sdk/*', 'pg-native'],
+      nodeModules: ['pg'],
+    };
+
+    const rdsConnectPolicy = new PolicyStatement({
+      actions: ['rds-db:connect'],
+      resources: [
+        `arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`,
+      ],
+    });
+
     const tenantsListFn = new NodejsFunction(this, 'TenantsListFn', {
       entry: TENANTS_LIST_ENTRY,
       handler: 'handler',
@@ -71,11 +115,11 @@ export class IngestionStack extends Stack {
       architecture: Architecture.ARM_64,
       memorySize: 256,
       timeout: Duration.seconds(10),
-      environment: {
-        LOG_LEVEL: isProd ? 'info' : 'debug',
-      },
-      bundling: { externalModules: ['@aws-sdk/*'] },
+      ...commonVpcConfig,
+      environment: commonEnv,
+      bundling: commonBundling,
     });
+    tenantsListFn.addToRolePolicy(rdsConnectPolicy);
 
     const codefFetchFn = new NodejsFunction(this, 'CodefFetchFn', {
       entry: CODEF_FETCH_ENTRY,
@@ -84,13 +128,17 @@ export class IngestionStack extends Stack {
       architecture: Architecture.ARM_64,
       memorySize: 512,
       timeout: Duration.seconds(60),
+      ...commonVpcConfig,
       environment: {
-        CODEF_MODE: 'mock',
-        SYSTEM_USER_UUID: '00000000-0000-0000-0000-000000000001',
-        LOG_LEVEL: isProd ? 'info' : 'debug',
+        ...commonEnv,
+        CODEF_SECRET_ARN: codefSecret.secretArn,
+        CLASSIFY_QUEUE_URL: classifyQueue.queueUrl,
       },
-      bundling: { externalModules: ['@aws-sdk/*'] },
+      bundling: commonBundling,
     });
+    codefFetchFn.addToRolePolicy(rdsConnectPolicy);
+    codefSecret.grantRead(codefFetchFn);
+    classifyQueue.grantSendMessages(codefFetchFn);
 
     const classifyWorkerFn = new NodejsFunction(this, 'CodefClassifyWorkerFn', {
       entry: CLASSIFY_WORKER_ENTRY,
@@ -100,12 +148,26 @@ export class IngestionStack extends Stack {
       memorySize: 512,
       timeout: Duration.seconds(30),
       reservedConcurrentExecutions: 5,
+      ...commonVpcConfig,
       environment: {
-        SYSTEM_USER_UUID: '00000000-0000-0000-0000-000000000001',
-        LOG_LEVEL: isProd ? 'info' : 'debug',
+        ...commonEnv,
+        BEDROCK_MODEL_ID: BEDROCK_PROFILE_ID,
+        CLASSIFY_MODE: isProd ? 'bedrock' : 'stub',
+        TRANSACTION_CACHE_TABLE_NAME: props.transactionCache.tableName,
       },
-      bundling: { externalModules: ['@aws-sdk/*'] },
+      bundling: commonBundling,
     });
+    classifyWorkerFn.addToRolePolicy(rdsConnectPolicy);
+    classifyWorkerFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['bedrock:InvokeModel', 'bedrock:Converse'],
+        resources: [
+          `arn:aws:bedrock:${region}:${account}:inference-profile/${BEDROCK_PROFILE_ID}`,
+          'arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6',
+        ],
+      }),
+    );
+    props.transactionCache.grantReadWriteData(classifyWorkerFn);
 
     classifyWorkerFn.addEventSource(
       new SqsEventSource(classifyQueue, {
@@ -146,7 +208,7 @@ export class IngestionStack extends Stack {
       itemsPath: '$.listOut.tenantIds',
       maxConcurrency: 3,
     });
-    map.iterator(fetchTenantTask);
+    map.itemProcessor(fetchTenantTask);
 
     const definition = sfn.Chain.start(listTenantsTask).next(map);
 
@@ -155,21 +217,62 @@ export class IngestionStack extends Stack {
       tracingEnabled: true,
     });
 
-    const lambdaExecutionSuppressions = [
+    const vpcLambdaSuppressions = [
       {
         id: 'AwsSolutions-L1',
         reason: 'NODEJS_20_X is current LTS; Lambda 22 adoption deferred.',
       },
       {
         id: 'AwsSolutions-IAM4',
-        reason: 'AWSLambdaBasicExecutionRole is required for managed logging per AWS Lambda baseline.',
-        appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'],
+        reason: 'AWSLambdaVPCAccessExecutionRole + AWSLambdaBasicExecutionRole are required for VPC Lambda',
+        appliesTo: [
+          'Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole',
+          'Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole',
+        ],
+      },
+      {
+        id: 'AwsSolutions-IAM5',
+        reason: 'rds-db:connect ARN is scoped to app_user on this cluster; wildcard suffix from CDK execution role.',
+        appliesTo: ['Resource::*'],
       },
     ] as const;
 
-    for (const fn of [tenantsListFn, codefFetchFn, classifyWorkerFn, fxCollectorFn]) {
-      NagSuppressions.addResourceSuppressions(fn, [...lambdaExecutionSuppressions], true);
+    for (const fn of [tenantsListFn, codefFetchFn, classifyWorkerFn]) {
+      NagSuppressions.addResourceSuppressions(fn, [...vpcLambdaSuppressions], true);
     }
+
+    NagSuppressions.addResourceSuppressions(
+      fxCollectorFn,
+      [
+        {
+          id: 'AwsSolutions-L1',
+          reason: 'NODEJS_20_X is current LTS; Lambda 22 adoption deferred.',
+        },
+        {
+          id: 'AwsSolutions-IAM4',
+          reason: 'AWSLambdaBasicExecutionRole is required for managed logging per AWS Lambda baseline.',
+          appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'],
+        },
+      ],
+      true,
+    );
+
+    NagSuppressions.addResourceSuppressions(
+      classifyWorkerFn,
+      [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'Bedrock inference profile resource includes foundation-model wildcard ARN as required by SDK routing.',
+          appliesTo: ['Resource::arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6'],
+        },
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'kms:ReEncrypt* and kms:GenerateDataKey* added by CDK grantReadWriteData for DynamoDB CMK; scoped to transactionCache key.',
+          appliesTo: ['Action::kms:ReEncrypt*', 'Action::kms:GenerateDataKey*'],
+        },
+      ],
+      true,
+    );
 
     const stateMachinePolicy = stateMachine.role.node.tryFindChild('DefaultPolicy');
     if (stateMachinePolicy) {

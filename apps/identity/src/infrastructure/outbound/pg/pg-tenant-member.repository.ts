@@ -14,6 +14,19 @@ interface TenantMemberRow {
 }
 
 export class PgTenantMemberRepository implements TenantMemberRepository {
+  async isMember(params: { tenantId: string; userId: string; cognitoSub: string }): Promise<boolean> {
+    return withRlsContext({ userId: params.userId, cognitoSub: params.cognitoSub }, async (c: PoolClient) => {
+      const result = await c.query<{ exists: boolean }>(
+        `SELECT EXISTS (
+          SELECT 1 FROM tenant_members
+          WHERE tenant_id = $1 AND user_id = $2
+        ) AS exists`,
+        [params.tenantId, params.userId],
+      );
+      return result.rows[0]?.exists ?? false;
+    });
+  }
+
   async add(params: {
     tenantId: string;
     userId: string;

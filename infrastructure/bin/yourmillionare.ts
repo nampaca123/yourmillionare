@@ -73,10 +73,17 @@ api.addDependency(network);
 api.addDependency(data);
 api.addDependency(identity);
 
-new IngestionStack(app, `${config.stackPrefix}-Ingestion`, {
+const ingestion = new IngestionStack(app, `${config.stackPrefix}-Ingestion`, {
   env,
   deploymentEnv: config.env,
+  vpc: network.vpc,
+  lambdaSg: network.lambdaSg,
+  aurora: data.aurora,
+  codefSecretArn: 'arn:aws:secretsmanager:ap-northeast-2:823401933116:secret:CodefCredentialSecret7E1320-XiBlOcErWWsI-brY9xT',
+  transactionCache: data.cache.transactionCache,
 });
+ingestion.addDependency(network);
+ingestion.addDependency(data);
 
 Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));
 

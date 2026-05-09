@@ -22,6 +22,10 @@ export class InMemoryTenantMemberRepository implements TenantMemberRepository {
     return member;
   }
 
+  async isMember(params: { tenantId: string; userId: string; cognitoSub: string }): Promise<boolean> {
+    return this.store.some((m) => m.tenantId === params.tenantId && m.userId === params.userId);
+  }
+
   allFor(userId: string): TenantMember[] {
     return this.store.filter((m) => m.userId === userId);
   }

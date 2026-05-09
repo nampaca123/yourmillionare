@@ -31,7 +31,11 @@ export class CreateJournalEntryUseCase {
       ...(params.description !== undefined ? { description: params.description } : {}),
     });
     const saved = await this.journals.save(entry, params.userId);
-    await this.cache.projectEntry(params.tenantId, saved);
+    try {
+      await this.cache.projectEntry(params.tenantId, saved);
+    } catch {
+      // Non-fatal: cache projection failure must not roll back a committed journal entry.
+    }
     return saved;
   }
 }

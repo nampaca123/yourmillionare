@@ -151,6 +151,59 @@ append "$(jq -nc --arg ep 'GET /me/tenants' --arg sc "$HTTP_CODE" --argjson exp 
   '{endpoint:$ep,scenario:"no_auth",expectHttp:$exp,http:($sc|tonumber),body:$body,pass:(($sc|tonumber)==$exp)}')"
 
 FAKE_TENANT='00000000-0000-4000-a000-000000000001'
+
+# --- POST /tenants/{tenantId}/bank-accounts ---
+BANK_URL="$BASE/tenants/$TENANT_FIRST/bank-accounts"
+
+curl_json -X POST "$BANK_URL" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"organization":"0088","accountNumber":"110-123-456789"}'
+BANK_ACCOUNT_ID="$(printf '%s' "$RESP_BODY" | jq -r '.id // empty')"
+append "$(jq -nc --arg ep 'POST .../bank-accounts' --arg sc "$HTTP_CODE" --argjson exp 201 --arg body "$RESP_BODY" \
+  '{endpoint:$ep,scenario:"valid_bank_account",expectHttp:$exp,http:($sc|tonumber),body:$body,pass:(($sc|tonumber)==$exp)}')"
+
+curl_json -X POST "$BANK_URL" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"organization":"0088","accountNumber":"110-123-456789"}'
+append "$(jq -nc --arg ep 'POST .../bank-accounts' --arg sc "$HTTP_CODE" --argjson exp 409 --arg body "$RESP_BODY" \
+  '{endpoint:$ep,scenario:"duplicate_account",expectHttp:$exp,http:($sc|tonumber),body:$body,pass:(($sc|tonumber)==$exp)}')"
+
+curl_json -X POST "$BANK_URL" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"organization":"008","accountNumber":"110-123-456789"}'
+append "$(jq -nc --arg ep 'POST .../bank-accounts' --arg sc "$HTTP_CODE" --argjson exp 422 --arg body "$RESP_BODY" \
+  '{endpoint:$ep,scenario:"org_too_short",expectHttp:$exp,http:($sc|tonumber),body:$body,pass:(($sc|tonumber)==$exp)}')"
+
+curl_json -X POST "$BANK_URL" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"organization":"0088","accountNumber":""}'
+append "$(jq -nc --arg ep 'POST .../bank-accounts' --arg sc "$HTTP_CODE" --argjson exp 422 --arg body "$RESP_BODY" \
+  '{endpoint:$ep,scenario:"account_empty",expectHttp:$exp,http:($sc|tonumber),body:$body,pass:(($sc|tonumber)==$exp)}')"
+
+curl_json -X POST "$BANK_URL" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{}'
+append "$(jq -nc --arg ep 'POST .../bank-accounts' --arg sc "$HTTP_CODE" --argjson exp 422 --arg body "$RESP_BODY" \
+  '{endpoint:$ep,scenario:"missing_body",expectHttp:$exp,http:($sc|tonumber),body:$body,pass:(($sc|tonumber)==$exp)}')"
+
+curl_json -X POST "$BASE/tenants/$FAKE_TENANT/bank-accounts" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"organization":"0088","accountNumber":"110-999-000001"}'
+append "$(jq -nc --arg ep 'POST .../bank-accounts' --arg sc "$HTTP_CODE" --argjson exp 403 --arg body "$RESP_BODY" \
+  '{endpoint:$ep,scenario:"wrong_tenant",expectHttp:$exp,http:($sc|tonumber),body:$body,pass:(($sc|tonumber)==$exp)}')"
+
+curl_json -X POST "$BANK_URL" \
+  -H 'Content-Type: application/json' \
+  --data '{"organization":"0020","accountNumber":"220-001-000001"}'
+append "$(jq -nc --arg ep 'POST .../bank-accounts' --arg sc "$HTTP_CODE" --argjson exp 401 --arg body "$RESP_BODY" \
+  '{endpoint:$ep,scenario:"no_auth",expectHttp:$exp,http:($sc|tonumber),body:$body,pass:(($sc|tonumber)==$exp)}')"
+
 CLASSIFY_URL="$BASE/tenants/$FAKE_TENANT/journal/classify"
 curl_json -X POST "$CLASSIFY_URL" \
   -H "Authorization: Bearer $TOKEN" \

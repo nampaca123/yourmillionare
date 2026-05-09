@@ -14,3 +14,4 @@ export type { JournalRepository } from './application/ports/journal.repository.p
 export { BedrockConverseClassifier } from './infrastructure/bedrock/bedrock-converse.classifier.js';
 export { DeterministicStubClassifier } from './infrastructure/stub/deterministic-stub.classifier.js';
 export { DdbCacheProjectorAdapter } from './infrastructure/ddb/ddb-cache-projector.adapter.js';
+export { PgJournalRepository } from './infrastructure/pg/pg-journal.repository.js';
