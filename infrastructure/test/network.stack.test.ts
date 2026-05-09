@@ -42,8 +42,8 @@ describe('NetworkStack (dev)', () => {
     template.resourceCountIs('AWS::EC2::VPC', 1);
   });
 
-  it('should create 6 subnets total (3 PUBLIC + 3 PRIVATE_ISOLATED) when synthesized', () => {
-    template.resourceCountIs('AWS::EC2::Subnet', 6);
+  it('should create 9 subnets total (3 PUBLIC + 3 PRIVATE_ISOLATED + 3 PRIVATE_WITH_EGRESS) when synthesized', () => {
+    template.resourceCountIs('AWS::EC2::Subnet', 9);
   });
 
   it('should create 0 NAT gateways when synthesized', () => {
@@ -94,7 +94,7 @@ describe('NetworkStack (prod)', () => {
     template.resourceCountIs('AWS::EC2::NatGateway', 0);
   });
 
-  it('should create 6 subnets in prod when synthesized', () => {
-    template.resourceCountIs('AWS::EC2::Subnet', 6);
+  it('should create 9 subnets in prod when synthesized', () => {
+    template.resourceCountIs('AWS::EC2::Subnet', 9);
   });
 });

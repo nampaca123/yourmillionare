@@ -44,6 +44,8 @@ export class CacheConstruct {
     this.idempotencyKeys = makeTable(scope, `${id}IdempotencyKeys`, props.sharedKey, isProd, {
       timeToLiveAttribute: 'expires_at',
     });
-    this.costCounter = makeTable(scope, `${id}CostCounter`, props.sharedKey, isProd);
+    this.costCounter = makeTable(scope, `${id}CostCounter`, props.sharedKey, isProd, {
+      timeToLiveAttribute: 'expires_at',
+    });
   }
 }

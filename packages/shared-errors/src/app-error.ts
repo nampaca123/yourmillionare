@@ -44,4 +44,15 @@ export class ValidationError extends AppError {
   }
 }
 
+export class BedrockUnavailableError extends AppError {
+  constructor(logMessage?: string) {
+    super(
+      503,
+      'BEDROCK_UNAVAILABLE',
+      'AI classification is temporarily unavailable.',
+      logMessage,
+    );
+  }
+}
+
 export const isServerError = (err: AppError): boolean => err.statusCode >= SERVER_ERROR_THRESHOLD;

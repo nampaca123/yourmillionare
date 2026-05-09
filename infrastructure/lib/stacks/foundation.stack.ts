@@ -16,6 +16,7 @@ export interface FoundationStackProps extends StackProps {
 export class FoundationStack extends Stack {
   public readonly sharedKey: Key;
   public readonly codefCredentialSecret: Secret;
+  public readonly ecosCredentialSecret: Secret;
 
   constructor(scope: Construct, id: string, props: FoundationStackProps) {
     super(scope, id, props);
@@ -35,11 +36,25 @@ export class FoundationStack extends Stack {
       removalPolicy,
     });
 
+    this.ecosCredentialSecret = new Secret(this, 'EcosCredentialSecret', {
+      description: 'ECOS REST API credentials for FX rate ingestion. Inject value out-of-band.',
+      encryptionKey: this.sharedKey,
+      removalPolicy,
+    });
+
     NagSuppressions.addResourceSuppressions(this.codefCredentialSecret, [
       {
         id: 'AwsSolutions-SMG4',
         reason:
           'CODEF credentials are externally issued OAuth client + per-user Connected IDs; AWS-managed automatic rotation is not applicable. Rotation happens via AgentCore Identity flow (90-day cycle) added in Phase 1.',
+      },
+    ]);
+
+    NagSuppressions.addResourceSuppressions(this.ecosCredentialSecret, [
+      {
+        id: 'AwsSolutions-SMG4',
+        reason:
+          'ECOS API credentials are externally issued; AWS-managed automatic rotation is not applicable until Phase 1 credential broker.',
       },
     ]);
 
@@ -53,6 +68,12 @@ export class FoundationStack extends Stack {
       value: this.codefCredentialSecret.secretArn,
       description: 'ARN of the CODEF credential secret. Populate via AWS CLI before adapter deploys.',
       exportName: `${id}-CodefCredentialSecretArn`,
+    });
+
+    new CfnOutput(this, 'EcosCredentialSecretArn', {
+      value: this.ecosCredentialSecret.secretArn,
+      description: 'ARN of the ECOS credential secret for FX collector Lambdas.',
+      exportName: `${id}-EcosCredentialSecretArn`,
     });
   }
 }

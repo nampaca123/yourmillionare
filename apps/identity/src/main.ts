@@ -1,7 +1,12 @@
 // Dependency wiring: assembles stateless ports, use-cases, and controllers in module scope.
 
-import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { makeIdempotent } from '@aws-lambda-powertools/idempotency';
+import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2, Context } from 'aws-lambda';
+import {
+  IdempotencyAlreadyInProgressError,
+  IdempotencyValidationError,
+  makeIdempotent,
+} from '@aws-lambda-powertools/idempotency';
+import { IdempotencyInProgressError, IdempotencyKeyReusedError } from '@ym/shared-errors';
 import { PgUserRepository } from './infrastructure/outbound/pg/pg-user.repository.js';
 import { PgTenantRepository } from './infrastructure/outbound/pg/pg-tenant.repository.js';
 import { PgTenantMemberRepository } from './infrastructure/outbound/pg/pg-tenant-member.repository.js';
@@ -37,14 +42,30 @@ const listTenants = new ListMyTenantsUseCase(tenantRepo);
 const tenantCreatePersistence = buildPersistenceStore('tenant-create');
 const tenantCreateIdempotencyConfig = buildIdempotencyConfig('headers."idempotency-key"');
 
+export const registerIdentityPowertoolsContext = (lambdaContext: Context): void => {
+  tenantCreateIdempotencyConfig.registerLambdaContext(lambdaContext);
+};
+
+const idempotentCreateTenant = makeIdempotent(buildCreateTenantController(ensureUser, createTenant), {
+  persistenceStore: tenantCreatePersistence,
+  config: tenantCreateIdempotencyConfig,
+});
+
+const createTenantWithIdempotencyMapped: Handler = async (event) => {
+  try {
+    return await idempotentCreateTenant(event);
+  } catch (err) {
+    if (err instanceof IdempotencyValidationError) throw new IdempotencyKeyReusedError();
+    if (err instanceof IdempotencyAlreadyInProgressError) throw new IdempotencyInProgressError();
+    throw err;
+  }
+};
+
 export const container = {
   routes: {
     'GET /health': healthController,
     'GET /me': buildMeController(ensureUser),
-    'POST /tenants': makeIdempotent(buildCreateTenantController(ensureUser, createTenant), {
-      persistenceStore: tenantCreatePersistence,
-      config: tenantCreateIdempotencyConfig,
-    }),
+    'POST /tenants': createTenantWithIdempotencyMapped,
     'GET /me/tenants': buildListMyTenantsController(ensureUser, listTenants),
   } as Record<string, Handler>,
 };

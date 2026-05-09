@@ -1,6 +1,6 @@
 // EnsureAccountsSeededUseCase: self-healing seed — inserts K-IFRS defaults if none exist.
 
-import { K_IFRS_DEFAULT_ACCOUNTS } from '../domain/seed-accounts.js';
+import { K_IFRS_DEFAULT_ACCOUNTS } from '@ym/journal-core';
 import type { AccountRepository } from './ports/account.repository.port.js';
 
 export class EnsureAccountsSeededUseCase {

@@ -3,12 +3,12 @@
 import { describe, it, expect } from 'vitest';
 import { ZodError, z } from 'zod';
 import {
-  AppError,
   UnauthorizedError,
   ForbiddenError,
   NotFoundError,
   ConflictError,
   ValidationError,
+  BedrockUnavailableError,
   RateLimitError,
   IdempotencyKeyReusedError,
   IdempotencyInProgressError,
@@ -41,6 +41,13 @@ describe('toHttpErrorResponse', () => {
 
     expect(result.status).toBe(500);
     expect(result.body.error.code).toBe('INTERNAL_ERROR');
+  });
+
+  it('should map BedrockUnavailableError to 503', () => {
+    const result = toHttpErrorResponse(new BedrockUnavailableError('account setup'), ctx);
+
+    expect(result.status).toBe(503);
+    expect(result.body.error.code).toBe('BEDROCK_UNAVAILABLE');
   });
 
   it('should map RateLimitError to 429', () => {

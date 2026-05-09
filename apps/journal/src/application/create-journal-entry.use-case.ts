@@ -1,12 +1,15 @@
 // CreateJournalEntryUseCase: manual double-entry creation with balance validation.
 
-import { createJournalEntry } from '../domain/journal-entry.entity.js';
-import type { JournalEntry } from '../domain/journal-entry.entity.js';
-import type { JournalLine } from '../domain/journal-line.value-object.js';
-import type { JournalRepository } from './ports/journal.repository.port.js';
+import type { CacheProjector, JournalEntry, JournalLine, JournalRepository } from '@ym/journal-core';
+import { createJournalEntry, InvalidAccountCodeError } from '@ym/journal-core';
+import type { AccountRepository } from './ports/account.repository.port.js';
 
 export class CreateJournalEntryUseCase {
-  constructor(private readonly journals: JournalRepository) {}
+  constructor(
+    private readonly journals: JournalRepository,
+    private readonly accounts: AccountRepository,
+    private readonly cache: CacheProjector,
+  ) {}
 
   async execute(params: {
     tenantId: string;
@@ -15,14 +18,20 @@ export class CreateJournalEntryUseCase {
     description?: string;
     lines: JournalLine[];
   }): Promise<JournalEntry> {
+    const distinctCodes = [...new Set(params.lines.map((l) => l.accountCode))];
+    const missing = await this.accounts.findMissingCodes(params.tenantId, params.userId, distinctCodes);
+    if (missing.length > 0) throw new InvalidAccountCodeError(missing.join(','));
+
     const entry = createJournalEntry({
       tenantId: params.tenantId,
       entryDate: params.entryDate,
       source: 'manual',
-      description: params.description,
       lines: params.lines,
       createdBy: params.userId,
+      ...(params.description !== undefined ? { description: params.description } : {}),
     });
-    return this.journals.save(entry, params.userId);
+    const saved = await this.journals.save(entry, params.userId);
+    await this.cache.projectEntry(params.tenantId, saved);
+    return saved;
   }
 }

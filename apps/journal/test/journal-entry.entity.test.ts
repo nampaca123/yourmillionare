@@ -1,9 +1,7 @@
 // Unit tests for the JournalEntry entity balance validation.
 
 import { describe, it, expect } from 'vitest';
-import { createJournalEntry, assertBalanced } from '../src/domain/journal-entry.entity.js';
-import { createJournalLine } from '../src/domain/journal-line.value-object.js';
-import { UnbalancedJournalError } from '../src/domain/journal.errors.js';
+import { assertBalanced, createJournalEntry, createJournalLine, UnbalancedJournalError } from '@ym/journal-core';
 
 const debitLine = createJournalLine({ lineNo: 1, accountCode: '5401', debit: 50000, credit: 0 });
 const creditLine = createJournalLine({ lineNo: 2, accountCode: '1002', debit: 0, credit: 50000 });

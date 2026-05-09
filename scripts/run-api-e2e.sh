@@ -3,6 +3,26 @@ set -euo pipefail
 
 BASE="${API_BASE_URL:-https://p7d9jms82f.execute-api.ap-northeast-2.amazonaws.com}"
 OUT="${API_E2E_RAW:-$(dirname "$0")/../docs/api-e2e-raw.ndjson}"
+REGION="${AWS_REGION:-ap-northeast-2}"
+PROFILE="${AWS_PROFILE:-ym-dev}"
+
+if [[ -z "${ID_TOKEN:-}" ]] && [[ -n "${API_E2E_PASSWORD:-}" ]]; then
+  POOL_ID="$(aws cloudformation describe-stacks --profile "$PROFILE" --region "$REGION" \
+    --stack-name Ym-Dev-Identity --query 'Stacks[0].Outputs[?OutputKey==`UserPoolId`].OutputValue' --output text)"
+  CLIENT_ID="$(aws cloudformation describe-stacks --profile "$PROFILE" --region "$REGION" \
+    --stack-name Ym-Dev-Identity --query 'Stacks[0].Outputs[?OutputKey==`UserPoolClientId`].OutputValue' --output text)"
+  TOK="$(aws cognito-idp admin-initiate-auth --profile "$PROFILE" --region "$REGION" \
+    --user-pool-id "$POOL_ID" --client-id "$CLIENT_ID" \
+    --auth-flow ADMIN_USER_PASSWORD_AUTH \
+    --auth-parameters \
+      USERNAME="${API_E2E_USERNAME:-api-e2e-6a639eee@ym-e2e.test}",PASSWORD="$API_E2E_PASSWORD" \
+    --query 'AuthenticationResult.IdToken' --output text)"
+  if [[ -z "$TOK" || "$TOK" == "None" ]]; then
+    printf '%s\n' 'Cognito admin-initiate-auth did not return IdToken (check API_E2E_PASSWORD / AWS_PROFILE).' >&2
+    exit 1
+  fi
+  export ID_TOKEN="$TOK"
+fi
 
 : >"$OUT"
 
@@ -19,7 +39,7 @@ curl_json() {
   rm "$tmp"
 }
 
-TOKEN="${ID_TOKEN:?Set ID_TOKEN}"
+TOKEN="${ID_TOKEN:?Set ID_TOKEN or API_E2E_PASSWORD (with AWS_PROFILE/AWS_REGION)}"
 
 # GET /health
 curl_json "$BASE/health"
@@ -119,8 +139,8 @@ curl_json -X POST "$BASE/tenants" \
   -H "Idempotency-Key: $IDEM" \
   -H 'Content-Type: application/json' \
   --data-binary "{\"legalName\":\"Other\",\"displayName\":\"Other\",\"bizRegNo\":\"$OTHER_BIZ\"}"
-append "$(jq -nc --arg ep 'POST /tenants' --arg sc "$HTTP_CODE" --arg body "$RESP_BODY" \
-  '{endpoint:$ep,scenario:"idempotency_key_body_mismatch",expectHttp:"500 or 409",http:($sc|tonumber),body:$body,pass:(($sc|tonumber)==500 or ($sc|tonumber)==409)}')"
+append "$(jq -nc --arg ep 'POST /tenants' --arg sc "$HTTP_CODE" --argjson exp 409 --arg body "$RESP_BODY" \
+  '{endpoint:$ep,scenario:"idempotency_key_body_mismatch",expectHttp:$exp,http:($sc|tonumber),body:$body,pass:(($sc|tonumber)==$exp)}')"
 
 curl_json -H "Authorization: Bearer $TOKEN" "$BASE/me/tenants"
 append "$(jq -nc --arg ep 'GET /me/tenants' --arg sc "$HTTP_CODE" --argjson exp 200 --arg body "$RESP_BODY" \
@@ -155,6 +175,40 @@ append "$(jq -nc --arg ep 'POST .../classify' --arg sc "$HTTP_CODE" --argjson ex
   '{endpoint:$ep,scenario:"valid_classify",expectHttp:$exp,http:($sc|tonumber),body:$body,pass:(($sc|tonumber)==$exp)}')"
 CLASSIFY_OK_BODY="$RESP_BODY"
 
+CLASSIFY_IDEM="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+CLASSIFY_IDEM_BODY='{"date":"2026-05-10","amount":17500,"counterparty":"Idempotent Shop","memo":"idem classify"}'
+curl_json -X POST "$CLASSIFY_OWN" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: $CLASSIFY_IDEM" \
+  -H 'Content-Type: application/json' \
+  --data "$CLASSIFY_IDEM_BODY"
+CLASSIFY_IDEM_HTTP="$HTTP_CODE"
+CLASSIFY_ENTRY_ID="$(printf '%s' "$RESP_BODY" | jq -r '.id // empty')"
+append "$(jq -nc --arg ep 'POST .../classify' --arg sc "$HTTP_CODE" --argjson exp 201 --arg body "$RESP_BODY" \
+  '{endpoint:$ep,scenario:"classify_idempotency_first",expectHttp:$exp,http:($sc|tonumber),body:$body,pass:(($sc|tonumber)==$exp)}')"
+
+curl_json -X POST "$CLASSIFY_OWN" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: $CLASSIFY_IDEM" \
+  -H 'Content-Type: application/json' \
+  --data "$CLASSIFY_IDEM_BODY"
+CID2="$(printf '%s' "$RESP_BODY" | jq -r '.id // empty')"
+NOTE_CLASSIFY="id1=$CLASSIFY_ENTRY_ID id2=$CID2"
+PASS_CLASSIFY_REPLAY=false
+if [[ "$CLASSIFY_IDEM_HTTP" == 200 || "$CLASSIFY_IDEM_HTTP" == 201 ]] \
+  && [[ "$HTTP_CODE" == 200 || "$HTTP_CODE" == 201 ]] \
+  && [[ -n "$CLASSIFY_ENTRY_ID" ]] && [[ "$CLASSIFY_ENTRY_ID" == "$CID2" ]]; then PASS_CLASSIFY_REPLAY=true; fi
+append "$(jq -nc --arg ep 'POST .../classify' --arg sc "$HTTP_CODE" --argjson exp 201 --arg body "$RESP_BODY" --arg note "$NOTE_CLASSIFY" --argjson p "$PASS_CLASSIFY_REPLAY" \
+  '{endpoint:$ep,scenario:"classify_idempotency_repeat_same_body",expectHttp:$exp,http:($sc|tonumber),body:$body,pass:$p,note:$note}')"
+
+curl_json -X POST "$CLASSIFY_OWN" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: $CLASSIFY_IDEM" \
+  -H 'Content-Type: application/json' \
+  --data '{"date":"2026-05-11","amount":18000,"counterparty":"Other Shop","memo":"body mismatch"}'
+append "$(jq -nc --arg ep 'POST .../classify' --arg sc "$HTTP_CODE" --argjson exp 409 --arg body "$RESP_BODY" \
+  '{endpoint:$ep,scenario:"classify_idempotency_key_body_mismatch",expectHttp:$exp,http:($sc|tonumber),body:$body,pass:(($sc|tonumber)==$exp)}')"
+
 ENTRIES_URL="$BASE/tenants/$TENANT_FIRST/journal/entries"
 curl_json -X POST "$ENTRIES_URL" \
   -H "Authorization: Bearer $TOKEN" \
@@ -169,6 +223,13 @@ curl_json -X POST "$ENTRIES_URL" \
   --data '{"entryDate":"2026-05-02","lines":[{"lineNo":1,"accountCode":"1002","debit":10000,"credit":0},{"lineNo":2,"accountCode":"2201","debit":0,"credit":10000}]}'
 append "$(jq -nc --arg ep 'POST .../entries' --arg sc "$HTTP_CODE" --argjson exp 201 --arg body "$RESP_BODY" \
   '{endpoint:$ep,scenario:"valid_manual_entry",expectHttp:$exp,http:($sc|tonumber),body:$body,pass:(($sc|tonumber)==$exp)}')"
+
+curl_json -X POST "$ENTRIES_URL" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"entryDate":"2026-05-04","lines":[{"lineNo":1,"accountCode":"9999","debit":1,"credit":0},{"lineNo":2,"accountCode":"2201","debit":0,"credit":1}]}'
+append "$(jq -nc --arg ep 'POST .../entries' --arg sc "$HTTP_CODE" --argjson exp 422 --arg body "$RESP_BODY" \
+  '{endpoint:$ep,scenario:"invalid_account_codes",expectHttp:$exp,http:($sc|tonumber),body:$body,pass:(($sc|tonumber)==$exp)}')"
 
 ENTRIES_FAKE="$BASE/tenants/$FAKE_TENANT/journal/entries"
 curl_json -X POST "$ENTRIES_FAKE" \
@@ -189,8 +250,8 @@ curl_json -X POST "$ENTRIES_URL" \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   --data '{"entryDate":"2026-05-03","lines":[{"lineNo":1,"accountCode":"1002","debit":100,"credit":100},{"lineNo":2,"accountCode":"2201","debit":0,"credit":0}]}'
-append "$(jq -nc --arg ep 'POST .../entries' --arg sc "$HTTP_CODE" --argjson exp 500 --arg body "$RESP_BODY" \
-  '{endpoint:$ep,scenario:"line_debit_and_credit_same_side",expectHttp:$exp,http:($sc|tonumber),body:$body,pass:(($sc|tonumber)==500)}')"
+append "$(jq -nc --arg ep 'POST .../entries' --arg sc "$HTTP_CODE" --argjson exp 422 --arg body "$RESP_BODY" \
+  '{endpoint:$ep,scenario:"line_debit_and_credit_same_side",expectHttp:$exp,http:($sc|tonumber),body:$body,pass:(($sc|tonumber)==$exp)}')"
 
 printf '{"primaryTenantId":"%s","classifyBody":%s}\n' "$TENANT_FIRST" "$(printf '%s' "$CLASSIFY_OK_BODY" | jq -c .)" >"$(dirname "$OUT")/api-e2e-meta.json"
 echo "$OUT"

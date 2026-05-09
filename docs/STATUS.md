@@ -1,92 +1,48 @@
 # 슬라이스 진행 현황
 
-## 스택별 상태 (Slice 4 기준)
+## 스택별 상태 (Slice 5 이후)
 
 | 스택 | 상태 | 비고 |
 |------|------|------|
-| `Ym-Dev-Foundation` | ✅ DEPLOYED | KMS CMK, CODEF Secrets 슬롯 |
+| `Ym-Dev-Foundation` | ✅ DEPLOYED | KMS CMK, **CODEF + ECOS** Secrets 슬롯 |
 | `Ym-Dev-Network` | ✅ DEPLOYED | VPC, SG, VPC Endpoints, NAT Instance, PRIVATE_WITH_EGRESS |
-| `Ym-Dev-Data` | ✅ DEPLOYED | Aurora + schema(baseline-v1 + migrations 0001-0002) + HostedRotation + DynamoDB |
+| `Ym-Dev-Data` | ✅ DEPLOYED | Aurora + schema + migrations (**0006–0008**) + DynamoDB |
 | `Ym-Dev-Identity` | ✅ DEPLOYED | Cognito User Pool + Client |
-| `Ym-Dev-Api` | ✅ DEPLOYED | HTTP API (`https://p7d9jms82f.execute-api.ap-northeast-2.amazonaws.com/`) + Identity Lambda + Journal Lambda |
+| `Ym-Dev-Api` | ✅ DEPLOYED | HTTP API + Identity/Journal Lambda (**journal-core**, transaction cache env) |
+| `Ym-Dev-Ingestion` | 🆕 CDK | CODEF EDA **스켈레톤** (SFN+SQS+스케줄+DLQ 알람), 실 로직은 후속 |
 
 ---
 
-## Slice 2 검증 결과 (2026-05-05 17:50 KST — 슬라이스 3 배포 후에는 RLS 정책 15개로 갱신 예정)
-
-### verifier-schema
-- `status: OK`
-- 테이블 10개 확인 (`actualTableCount: 10`)
-- RLS 정책 8개 확인
-
-### verifier-iam
-- `status: OK`
-- IAM 토큰으로 `app_user` Aurora 직접 연결 성공 (`iamConnectMs: 2127`)
-
----
-
-## Slice 3 코드 변경 요약
-
-| 파일 | 변경 내용 |
-|------|-----------|
-| `infrastructure/lib/stacks/data/sql/migrations/0001-onboarding-rls.sql` | users/tenants/tenant_members RLS 정책 재정의 |
-| `infrastructure/lib/stacks/data/schema-migrator.lambda.ts` | multifile migrations/ 지원 (파일별 트랜잭션 + sha256) |
-| `infrastructure/lib/stacks/data/verifier-schema.lambda.ts` | 정책 이름 화이트리스트 검증으로 전환 |
-| `infrastructure/lib/stacks/data/verifier-iam.lambda.ts` | RLS 격리 시나리오 추가 (tenant A/B fixture) |
-| `infrastructure/lib/stacks/data.stack.ts` | aurora public 노출, verifier-iam Data API 권한 추가 |
-| `infrastructure/lib/stacks/identity.stack.ts` | Cognito User Pool + Client (신규) |
-| `infrastructure/lib/stacks/api.stack.ts` | HTTP API + JWT Authorizer + Identity Lambda (신규) |
-| `infrastructure/bin/yourmillionare.ts` | Identity/Api 스택 배선 추가 |
-| `apps/identity/` | 헥사고날 도메인 패키지 전체 (신규) |
-| `docs/03-identity-api.ko.md` | Slice 3 설계 기록 |
-
----
-
-## 테스트 현황 (Slice 4 완료 시점)
+## 테스트 현황 (Slice 5)
 
 ```
-infrastructure: Test Files 5 passed (5), Tests 44 passed (44)
+infrastructure: Test Files 5 passed (5), Tests 46 passed (46)
 apps/identity:  Test Files 4 passed (4), Tests 15 passed (15)
 apps/journal:   Test Files 4 passed (4), Tests 13 passed (13)
-packages/shared-errors: (타입 전용, 런타임 테스트 없음)
+packages/journal-core: vitest (stub classifier 등)
+packages/shared-errors: vitest
 ```
 
-cdk-nag 에러 0건. 모든 단위 테스트 통과.
+`CDK_ENV=dev AWS_ACCOUNT_ID=123456789012 npx cdk synth Ym-Dev-Ingestion` — 성공 (로컬 검증).
 
 ---
 
-## Slice 4 코드 변경 요약
+## Phase 0 종료
 
-| 파일 | 변경 내용 |
-|------|-----------|
-| `infrastructure/lib/stacks/network.stack.ts` | t4g.nano NAT Instance (fck-nat), PRIVATE_WITH_EGRESS 서브넷 |
-| `infrastructure/lib/stacks/data.stack.ts` | HostedRotation (securityGroups:[lambdaSg]), `public cache` property, migrationsSha256 trigger |
-| `infrastructure/lib/stacks/data/schema-migrator.lambda.ts` | baseline-v1 stable key + legacy hash 감지, baseVersion 변수명 버그 fix |
-| `infrastructure/lib/stacks/data/sql/migrations/0002-accounts-unique.sql` | SELECT 1 no-op (원래 잘못된 ALTER TABLE 제거) |
-| `infrastructure/lib/stacks/api.stack.ts` | JournalFn (PRIVATE_WITH_EGRESS, 30s, 512MB), Idempotency 환경변수, journal 라우트 |
-| `infrastructure/bin/yourmillionare.ts` | `cache: data.cache` ApiStack 전달 |
-| `packages/shared-errors/` | AppError, RateLimitError, IdempotencyKeyReused/InProgress, toHttpErrorResponse 공유 패키지 |
-| `apps/identity/src/main.ts` | `makeIdempotent(POST /tenants)` 적용 |
-| `apps/identity/src/infrastructure/inbound/http/idempotency.config.ts` | Powertools persistence/config factory (신규) |
-| `apps/journal/` | 헥사고날 패키지 전체 (신규) |
-| `docs/04-slice4.ko.md` | Slice 4 설계 기록 |
+Slice 5 범위: **journal-core**, **캐시 projector**, **마이그레이션(ai_decisions·system tenant policy·dispatched_at)**, **Ingestion/Fx 스택 뼈대**, **시크릿 동기화 스크립트**. CODEF 실연동·워커 트랜잭션 분리·Powertools 전 Lambda 계측은 Slice 6에서 심화.
+
+자세한 설계·한계는 `docs/05-slice5.ko.md`.
 
 ---
 
-## 슬라이스 5 범위 (예정)
-
-슬라이스 4 완료 → CODEF 어댑터 연동(슬라이스 5)으로 넘어간다.
+## 다음 슬라이스 (Slice 6+)
 
 | 항목 | 비고 |
 |------|------|
-| CODEF API 어댑터 (`apps/codef`) | 은행 거래내역 수집 |
-| EventBridge → Step Functions → SQS 파이프라인 | classify 엔드포인트를 EDA로 교체 |
-| RDS Proxy (prod 한정) | CODEF 폴링 동시성 증가 시점에 도입 |
-| `ai_decisions` 테이블 | 학습 피드백 루프 |
-
----
-
-## Slice 2 검증 결과 (참고 — 슬라이스 3 배포 전 기준)
+| CODEF 실어댑터 (`apps/codef`) | mock fixture · Postgres · SQS 본문 연결 |
+| 파이프라인 고도화 | 워커 트랜잭션 분리·`ai_decisions`·Powertools 전 구간 |
+| RDS Proxy (prod) | CODEF 폴링 동시성 증가 시점에 도입 |
+| SFN Map API | `iterator` → `itemProcessor` 마이그레이션 |
 
 ---
 

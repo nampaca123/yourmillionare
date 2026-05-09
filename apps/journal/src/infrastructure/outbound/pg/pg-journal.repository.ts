@@ -1,8 +1,8 @@
 // PostgreSQL JournalRepository: persists journal entries and lines in a single transaction.
 
 import type { PoolClient } from 'pg';
-import type { JournalEntry } from '../../../domain/journal-entry.entity.js';
-import type { JournalRepository } from '../../../application/ports/journal.repository.port.js';
+import type { JournalEntry, JournalRepository } from '@ym/journal-core';
+import { ValidationError } from '@ym/shared-errors';
 import { withRlsContext } from './pg-rls.context.js';
 
 interface EntryRow {
@@ -10,21 +10,76 @@ interface EntryRow {
 }
 
 export class PgJournalRepository implements JournalRepository {
-  async save(entry: JournalEntry, userId: string): Promise<JournalEntry> {
-    return withRlsContext({ userId, tenantId: entry.tenantId }, async (c: PoolClient) => {
-      const entryResult = await c.query<EntryRow>(
+  async existsBySourceRef(client: PoolClient, tenantId: string, rawTransactionId: string): Promise<boolean> {
+    const result = await client.query<{ exists: boolean }>(
+      `SELECT EXISTS (
+        SELECT 1 FROM journal_entries
+        WHERE tenant_id = $1 AND source_ref_id = $2::uuid
+      ) AS exists`,
+      [tenantId, rawTransactionId],
+    );
+    return result.rows[0]?.exists ?? false;
+  }
+
+  async saveEntriesAtomically(client: PoolClient, entries: JournalEntry[]): Promise<JournalEntry[]> {
+    const saved: JournalEntry[] = [];
+    for (const entry of entries) {
+      if (!entry.id) throw new ValidationError('Journal entry id required for atomic batch save.');
+      const postingDate = entry.postingDate ?? entry.entryDate;
+      const entryResult = await client.query<EntryRow>(
         `INSERT INTO journal_entries
-           (tenant_id, entry_date, posting_date, source, description, ai_confidence, ai_model, created_by)
-         VALUES ($1, $2, $2, $3, $4, $5, $6, $7)
+           (id, tenant_id, entry_date, posting_date, source, description, ai_confidence, ai_model, created_by, source_ref_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT (id) DO NOTHING
          RETURNING id`,
         [
+          entry.id,
           entry.tenantId,
           entry.entryDate,
+          postingDate,
           entry.source,
           entry.description ?? null,
           entry.aiConfidence ?? null,
           entry.aiModel ?? null,
           entry.createdBy ?? null,
+          entry.sourceRefId ?? null,
+        ],
+      );
+
+      const entryId = entryResult.rows[0]?.id;
+      if (!entryId) continue;
+
+      for (const line of entry.lines) {
+        await client.query(
+          `INSERT INTO journal_lines (entry_id, tenant_id, line_no, account_code, debit, credit, memo)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [entryId, entry.tenantId, line.lineNo, line.accountCode, line.debit, line.credit, line.memo ?? null],
+        );
+      }
+
+      saved.push({ ...entry, id: entryId });
+    }
+    return saved;
+  }
+
+  async save(entry: JournalEntry, userId: string): Promise<JournalEntry> {
+    return withRlsContext({ userId, tenantId: entry.tenantId }, async (c: PoolClient) => {
+      const postingDate = entry.postingDate ?? entry.entryDate;
+      const entryResult = await c.query<EntryRow>(
+        `INSERT INTO journal_entries
+           (tenant_id, entry_date, posting_date, source, description, ai_confidence, ai_model, created_by, source_ref_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING id`,
+        [
+          entry.tenantId,
+          entry.entryDate,
+          postingDate,
+          entry.source,
+          entry.description ?? null,
+          entry.aiConfidence ?? null,
+          entry.aiModel ?? null,
+          entry.createdBy ?? null,
+          entry.sourceRefId ?? null,
         ],
       );
 

@@ -3,7 +3,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { EnsureAccountsSeededUseCase } from '../src/application/ensure-accounts-seeded.use-case.js';
 import { InMemoryAccountRepository } from './fakes/in-memory-account.repository.js';
-import { K_IFRS_DEFAULT_ACCOUNTS } from '../src/domain/seed-accounts.js';
+import { K_IFRS_DEFAULT_ACCOUNTS } from '@ym/journal-core';
 
 describe('EnsureAccountsSeededUseCase', () => {
   let useCase: EnsureAccountsSeededUseCase;

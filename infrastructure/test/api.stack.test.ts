@@ -37,6 +37,7 @@ const buildStack = (env: 'dev' | 'prod' = 'dev') => {
     lambdaSg: network.lambdaSg,
     auroraSg: network.auroraSg,
     sharedKey: foundation.sharedKey,
+    availabilityZones: [`${TEST_REGION}a`, `${TEST_REGION}b`, `${TEST_REGION}c`],
   });
 
   const identity = new IdentityStack(app, 'Ym-Identity', {
@@ -50,6 +51,7 @@ const buildStack = (env: 'dev' | 'prod' = 'dev') => {
     vpc: network.vpc,
     lambdaSg: network.lambdaSg,
     aurora: data.aurora,
+    cache: data.cache,
     identity,
     sharedKey: foundation.sharedKey,
   });
@@ -77,8 +79,8 @@ describe('ApiStack (dev)', () => {
     template.resourceCountIs('AWS::ApiGatewayV2::Authorizer', 1);
   });
 
-  it('should create exactly 4 routes when synthesized', () => {
-    template.resourceCountIs('AWS::ApiGatewayV2::Route', 4);
+  it('should create exactly 6 routes when synthesized', () => {
+    template.resourceCountIs('AWS::ApiGatewayV2::Route', 6);
   });
 
   it('should create 1 Lambda function for the identity handler when synthesized', () => {
@@ -113,5 +115,33 @@ describe('ApiStack (dev)', () => {
   it('should emit no cdk-nag errors when synthesized with AwsSolutionsChecks', () => {
     const errors = Annotations.fromStack(stack).findError('*', Match.stringLikeRegexp('AwsSolutions-.*'));
     expect(errors).toEqual([]);
+  });
+
+  it('should set journal stub classifier env to 1 for dev', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          JOURNAL_STUB_CLASSIFIER: '1',
+        }),
+      },
+    });
+  });
+});
+
+describe('ApiStack (prod)', () => {
+  let template: Template;
+
+  beforeAll(() => {
+    template = buildStack('prod').template;
+  });
+
+  it('should set journal stub classifier env to 0 for prod', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          JOURNAL_STUB_CLASSIFIER: '0',
+        }),
+      },
+    });
   });
 });

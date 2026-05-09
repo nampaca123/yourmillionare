@@ -37,6 +37,7 @@ const buildStack = (env: 'dev' | 'prod' = 'dev') => {
     lambdaSg: network.lambdaSg,
     auroraSg: network.auroraSg,
     sharedKey: foundation.sharedKey,
+    availabilityZones: [`${TEST_REGION}a`, `${TEST_REGION}b`, `${TEST_REGION}c`],
   });
 
   Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));

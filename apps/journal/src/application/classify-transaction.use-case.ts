@@ -1,11 +1,14 @@
 // ClassifyTransactionUseCase: AI-classifies a transaction, checks daily limit, persists entry.
 
-import { RateLimitError } from '@ym/shared-errors';
-import { createJournalEntry } from '../domain/journal-entry.entity.js';
-import type { JournalEntry } from '../domain/journal-entry.entity.js';
-import type { TransactionClassifier, ClassifyInput } from './ports/transaction-classifier.port.js';
-import type { JournalRepository } from './ports/journal.repository.port.js';
+import type {
+  ClassifyInput,
+  JournalEntry,
+  JournalRepository,
+  TransactionClassifier,
+} from '@ym/journal-core';
+import { createJournalEntry } from '@ym/journal-core';
 import type { CostCounter } from './ports/cost-counter.port.js';
+import { RateLimitError } from '@ym/shared-errors';
 
 const DAILY_LIMIT_DEFAULT = 100;
 

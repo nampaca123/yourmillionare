@@ -11,16 +11,15 @@
 --    5. AI 추적성        : ai_confidence·ai_model 보관, 사용자 정정은 reversed_by 체인
 --
 --  MVP 제외 (향후 마이그레이션)
---    - tax_events     (세금 캘린더, Phase 1)
---    - notifications  (운영 이벤트)
---    - ai_decisions   (reversed_by 체인으로 우회)
---    - 화면 캐시      (DynamoDB로 별도 처리)
+--    - tax_events       (세금 캘린더, Phase 1)
+--    - notifications    (운영 이벤트)
+--    - 화면 캐시        (DynamoDB로 별도 처리)
 --
 --  스키마 변경 이력
 --    본 파일은 신규 클러스터에 적용되는 전체 DDL + RLS 단일 진실 원천으로 유지된다.
---    기존 `infrastructure/.../sql/migrations/0002-*.sql` 등 과거 순번 파일은 schema_migrations
---    기록 호환만 위해 no-op(SELECT 1)로 남겼다 (`schema-migrator.lambda.ts` 참고).
---    운영 DB와의 검증 예: RDS Data API 로 information_schema/pg_policies / `Ym-Dev` 2026-05-07.
+--    마이그레이션 0006(ai_decisions)·0007(system user SELECT 정책)·0008(raw_transactions.dispatched_at)
+--    상태가 본 파일에 반영된다. 과거 순번 파일은 schema_migrations 기록 호환용일 수 있다.
+--    운영 DB와의 검증 예: RDS Data API / verifier-schema Lambda (`EXPECTED_POLICIES`).
 --    활성 정책 이름은 `verifier-schema.lambda.ts` 의 EXPECTED_POLICIES 과 일치해야 한다.
 -- ============================================================
 
@@ -241,6 +240,24 @@ CREATE CONSTRAINT TRIGGER trg_assert_journal_balanced
 
 
 -- ============================================================
+--  6b. ai_decisions — Bedrock 분류 메타데이터 (감사·품질)
+-- ============================================================
+
+CREATE TABLE ai_decisions (
+  entry_id          UUID NOT NULL REFERENCES journal_entries(id) ON DELETE CASCADE,
+  tenant_id         UUID NOT NULL,
+  model             VARCHAR(50) NOT NULL,
+  input_tokens      INT,
+  output_tokens     INT,
+  confidence        NUMERIC(4, 3),
+  user_corrected    BOOLEAN NOT NULL DEFAULT FALSE,
+  corrected_at      TIMESTAMPTZ,
+  correction_diff   JSONB,
+  PRIMARY KEY (entry_id)
+);
+
+
+-- ============================================================
 --  7. raw_transactions — CODEF 원응답 + 멱등성
 -- ============================================================
 CREATE TABLE raw_transactions (
@@ -255,10 +272,15 @@ CREATE TABLE raw_transactions (
   counterparty  VARCHAR(200),
   raw_payload   JSONB          NOT NULL,
   fetched_at    TIMESTAMPTZ    NOT NULL DEFAULT now(),
+  dispatched_at TIMESTAMPTZ,
   UNIQUE (tenant_id, source, external_id)
 );
 
 CREATE INDEX idx_raw_tx_tenant_time ON raw_transactions(tenant_id, occurred_at DESC);
+
+CREATE INDEX idx_raw_undispatched
+  ON raw_transactions(tenant_id, dispatched_at)
+  WHERE dispatched_at IS NULL;
 
 COMMENT ON TABLE  raw_transactions             IS 'CODEF 원응답 보관. (tenant_id, source, external_id) UNIQUE로 폴링 멱등성 보장';
 COMMENT ON COLUMN raw_transactions.amount      IS 'KRW 환산 금액. 외화 거래는 raw_payload의 환율로 환산해서 저장';
@@ -290,7 +312,7 @@ COMMENT ON COLUMN fx_observations.rate_type   IS 'closing: 매매기준율. tt_b
 
 
 -- ============================================================
---  Row Level Security — app_user (matches migrations 0001-0005 applied state)
+--  Row Level Security — app_user (matches migrations 0001–0008 applied state)
 --  Migrator role bypasses RLS. Lambda sessions must SET app.cognito_sub,
 --  app.current_user_id, app.current_tenant_id as required by policies below.
 --  app_uuid_from_setting() avoids casting blank GUCs to UUID in OR branches.
@@ -323,6 +345,7 @@ ALTER TABLE tenant_members   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE accounts         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE journal_entries  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE journal_lines    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ai_decisions     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE raw_transactions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE users            ENABLE ROW LEVEL SECURITY;
 ALTER TABLE user_profiles    ENABLE ROW LEVEL SECURITY;
@@ -357,6 +380,10 @@ CREATE POLICY tenants_select_by_membership ON tenants
       AND tenants.created_by_user_id = app_uuid_from_setting('app.current_user_id')
     )
   );
+
+CREATE POLICY tenants_system_select ON tenants
+  FOR SELECT TO app_user
+  USING (current_setting('app.cognito_sub', true) = 'system');
 
 CREATE POLICY tenants_modify_current ON tenants
   FOR UPDATE TO app_user
@@ -402,6 +429,11 @@ CREATE POLICY tenant_isolation ON journal_lines
   USING      (tenant_id = app_uuid_from_setting('app.current_tenant_id'))
   WITH CHECK (tenant_id = app_uuid_from_setting('app.current_tenant_id'));
 
+CREATE POLICY tenant_isolation ON ai_decisions
+  FOR ALL TO app_user
+  USING      (tenant_id = app_uuid_from_setting('app.current_tenant_id'))
+  WITH CHECK (tenant_id = app_uuid_from_setting('app.current_tenant_id'));
+
 CREATE POLICY tenant_isolation ON raw_transactions
   FOR ALL TO app_user
   USING      (tenant_id = app_uuid_from_setting('app.current_tenant_id'))
@@ -413,3 +445,7 @@ CREATE POLICY profile_self_only ON user_profiles
   WITH CHECK (user_id = app_uuid_from_setting('app.current_user_id'));
 
 -- fx_observations intentionally has no RLS: cross-tenant shared FX rates, no PII.
+
+INSERT INTO users (id, cognito_sub, email)
+VALUES ('00000000-0000-0000-0000-000000000001'::uuid, 'system', 'system@ym.internal')
+ON CONFLICT (cognito_sub) DO NOTHING;

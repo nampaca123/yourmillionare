@@ -1,11 +1,27 @@
 // PostgreSQL AccountRepository: bulk-inserts K-IFRS seed accounts with ON CONFLICT DO NOTHING.
 
 import type { PoolClient } from 'pg';
-import type { SeedAccount } from '../../../domain/seed-accounts.js';
+import type { SeedAccount } from '@ym/journal-core';
 import type { AccountRepository } from '../../../application/ports/account.repository.port.js';
 import { withRlsContext } from './pg-rls.context.js';
 
 export class PgAccountRepository implements AccountRepository {
+  async findMissingCodes(tenantId: string, userId: string, codes: string[]): Promise<string[]> {
+    if (codes.length === 0) return [];
+    return withRlsContext({ userId, tenantId }, async (c: PoolClient) => {
+      const result = await c.query<{ code: string }>(
+        `WITH wanted AS (SELECT unnest($2::text[]) AS code)
+         SELECT w.code FROM wanted w
+         WHERE NOT EXISTS (
+           SELECT 1 FROM accounts a WHERE a.tenant_id = $1 AND a.code = w.code
+         )
+         ORDER BY w.code`,
+        [tenantId, codes],
+      );
+      return result.rows.map((r) => r.code);
+    });
+  }
+
   async countByTenant(tenantId: string, userId: string): Promise<number> {
     return withRlsContext({ userId, tenantId }, async (c: PoolClient) => {
       const result = await c.query<{ count: string }>(

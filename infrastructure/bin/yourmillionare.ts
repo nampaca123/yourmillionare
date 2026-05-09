@@ -9,6 +9,7 @@ import { NetworkStack } from '../lib/stacks/network.stack.js';
 import { DataStack } from '../lib/stacks/data.stack.js';
 import { IdentityStack } from '../lib/stacks/identity.stack.js';
 import { ApiStack } from '../lib/stacks/api.stack.js';
+import { IngestionStack } from '../lib/stacks/ingestion.stack.js';
 
 const config = loadEnvConfig();
 const env = { account: config.account, region: config.region };
@@ -71,6 +72,11 @@ const api = new ApiStack(app, `${config.stackPrefix}-Api`, {
 api.addDependency(network);
 api.addDependency(data);
 api.addDependency(identity);
+
+new IngestionStack(app, `${config.stackPrefix}-Ingestion`, {
+  env,
+  deploymentEnv: config.env,
+});
 
 Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));
 

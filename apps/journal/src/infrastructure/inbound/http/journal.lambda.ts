@@ -1,11 +1,15 @@
 // Lambda entry point: dispatches journal requests to controllers by routeKey.
 
-import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { container } from '../../../main.js';
+import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2, Context } from 'aws-lambda';
+import { container, registerJournalPowertoolsContext } from '../../../main.js';
 import { toHttpErrorResponse } from '@ym/shared-errors';
 import { logger } from '../../../shared/logging/logger.js';
 
-export const handler = async (event: APIGatewayProxyEventV2WithJWTAuthorizer): Promise<APIGatewayProxyResultV2> => {
+export const handler = async (
+  event: APIGatewayProxyEventV2WithJWTAuthorizer,
+  context: Context,
+): Promise<APIGatewayProxyResultV2> => {
+  registerJournalPowertoolsContext(context);
   const requestId = event.requestContext.requestId;
   const path = event.requestContext.http.path;
   const log = logger.child({ requestId, path });

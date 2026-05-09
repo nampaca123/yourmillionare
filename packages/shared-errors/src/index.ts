@@ -7,6 +7,7 @@ export {
   NotFoundError,
   ConflictError,
   ValidationError,
+  BedrockUnavailableError,
   isServerError,
 } from './app-error.js';
 

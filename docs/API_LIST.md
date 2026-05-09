@@ -8,9 +8,9 @@
 
 | 구분 | 내용 |
 |------|------|
-| **인프라** | Foundation, Network, Data(Aurora + 마이그레이션 + DynamoDB), Identity(Cognito), Api(HTTP API + JWT + Identity/Journal Lambda) 배포 완료 (Slice 4 기준, `docs/STATUS.md`) |
-| **백엔드 앱** | `apps/identity` — 사용자·테넌트 온보딩. `apps/journal` — 거래 AI 분류·수동 분개. `packages/shared-errors` — 공통 에러/HTTP 매핑 |
-| **진행 단계** | Slice 4 완료(CODEF·EDA 등은 Slice 5 예정) |
+| **인프라** | Foundation, Network, Data(Aurora + 마이그레이션 **0006–0008** + DynamoDB), Identity(Cognito), Api(HTTP API + JWT + Identity/Journal Lambda), **Ingestion(CDK 스켈레톤, HTTP 없음)** — `docs/STATUS.md` |
+| **백엔드 앱** | `apps/identity`, `apps/journal`, **`packages/journal-core`**, `packages/shared-errors` |
+| **진행 단계** | Slice 5: journal-core 추출, 캐시 projector, `ai_decisions`·system SELECT RLS·`dispatched_at`, 멱등 예외 매핑·분개 검증 강화 |
 | **공통 인증** | Cognito **ID Token**만 통과 (`aud` = User Pool Client ID). Access Token은 사용하지 않는다. |
 
 라우트는 `infrastructure/lib/stacks/api.stack.ts`에 정의되며, Identity Lambda와 Journal Lambda가 `routeKey`로 분기한다.
@@ -50,7 +50,10 @@
 | 상황 | HTTP | `error.code` |
 |------|------|----------------|
 | 등록되지 않은 `routeKey` | **404** | `NOT_FOUND` |
-| 그 외 처리되지 않은 예외 (`Error`, AWS SDK 오류, Powertools Idempotency 내부 오류 등) | **500** | `INTERNAL_ERROR` |
+| 그 외 처리되지 않은 예외 (`Error`, 미매핑 AWS SDK 오류 등) | **500** | `INTERNAL_ERROR` |
+| Powertools 멱등 검증 실패(`IdempotencyValidationError` 등) | **409** | `IDEMPOTENCY_KEY_REUSED` 또는 `IDEMPOTENCY_IN_PROGRESS` |
+
+Powertools 예외는 Identity/Journal `main.ts`의 라우트 래퍼에서 위 `AppError` 코드로 치환된다.
 
 `toHttpErrorResponse` 구현: `packages/shared-errors/src/http-error.ts` — `ZodError` → 422 `VALIDATION_ERROR`, `AppError` 서브클래스 → 해당 `statusCode`/`code`, 그 외 → 500.
 
@@ -104,6 +107,7 @@
 | API Gateway JWT 실패 | 401 | (Gateway) |
 | JWT 클레임 형식 불일치 (`sub`/email/`token_use`/`aud`) | 401 | `UNAUTHORIZED` |
 | DB upsert 등 비정상 (`Upsert returned no row` 등) | 500 | `INTERNAL_ERROR` |
+| Lambda 통합 **타임아웃**(VPC→RDS 첫 연결 지연 등) | Gateway **500** 등 | (Gateway 기본 형태 가능; Identity timeout **30s**) |
 
 ---
 
@@ -145,7 +149,7 @@
 | Zod 스키마 불일치 (필드 누락, 길이 초과 등) | 422 | `VALIDATION_ERROR` | |
 | 사업자등록번호 형식 오류 | 422 | `VALIDATION_ERROR` | `InvalidBizRegNoError` (부모가 `ValidationError`) |
 | 동일 `biz_reg_no_hash` 이미 존재 (DB unique) | 409 | `CONFLICT` | PG 어댑터에서 `23505` → `ConflictError` (사용자 메시지는 공통 문구) |
-| 멱등 키는 같으나 **본문이 이전과 다름** (Powertools) | **500** | `INTERNAL_ERROR` | Powertools `IdempotencyValidationError` 등은 `AppError`가 아니어서 현재 매핑되지 않음 |
+| 멱등 키는 같으나 **본문이 이전과 다름** | **409** | `IDEMPOTENCY_KEY_REUSED` | `IdempotencyValidationError` → `apps/identity/src/main.ts` |
 | 멱등 처리·DynamoDB·KMS·DB 기타 오류 | 500 | `INTERNAL_ERROR` | |
 
 ---
@@ -174,6 +178,7 @@
 | API Gateway JWT 실패 | 401 | (Gateway) |
 | JWT 클레임 불일치 | 401 | `UNAUTHORIZED` |
 | DB 오류 | 500 | `INTERNAL_ERROR` |
+| Lambda **타임아웃**(VPC/RDS 콜드 스타트 등) | **504/502 계열 또는 Gateway 500** | (통합 계층) | Identity Lambda 타임아웃은 CDK에서 **30초**로 설정 |
 
 ---
 
@@ -181,7 +186,7 @@
 
 | 항목 | 내용 |
 |------|------|
-| **기능** | (1) 사용자·테넌트 **멤버십 확인** (2) 계정과목이 없으면 **K-IFRS 시드 계정 자동 삽입** (3) **일일 Bedrock 호출 한도** 확인 (4) **AWS Bedrock Converse**로 거래를 복식부기 라인으로 분류 (5) `journal_entries`에 저장 후 결과 반환. |
+| **기능** | (1) 멤버십 확인 (2) 차트 비어 있으면 **K-IFRS 시드** (3) **일일 분류 한도**(DynamoDB) (4) **분류기**로 복식 라인 생성 (5) `journal_entries` 저장. **`CDK_ENV=dev`** 배포 시 Lambda 환경변수 **`JOURNAL_STUB_CLASSIFIER=1`** 이면 **`DeterministicStubClassifier`** 가 호출되어 Bedrock 없이 고정 패턴(예: 소모품비/보통예금)으로 균형 분개를 만든다. **`prod`** 는 **`JOURNAL_STUB_CLASSIFIER=0`** + **`BedrockConverseClassifier`**. **`ai_decisions`** 테이블은 마이그레이션만 적용된 상태로, HTTP 경로에서 필수 기록은 아님. |
 | **인증** | 필수 |
 | **멱등성** | 선택 헤더 `Idempotency-Key`. 키가 없으면 멱등 레이어 없이 매번 실행. 키는 **헤더가 있으면 헤더**, 없으면 본문 `date`·`amount`·`counterparty`·`memo`를 결합해 유도된다 (`main.ts`의 JMESPath). TTL 24h. |
 | **경로 변수** | `tenantId`: UUID 문자열 |
@@ -204,8 +209,8 @@
   "id": "uuid",
   "tenantId": "uuid",
   "entryDate": "YYYY-MM-DD",
-  "aiConfidence": 0.0,
-  "aiModel": "global.anthropic.claude-sonnet-4-6",
+  "aiConfidence": 0.85,
+  "aiModel": "stub.k-ifrs-expense",
   "lines": [
     {
       "lineNo": 1,
@@ -218,7 +223,9 @@
 }
 ```
 
-**참고**: 현재 유스케이스는 엔티티 생성 시 `source`를 코드상 `'manual'`로 넣는다 (DB `source` 컬럼 의미와 맞추는 리팩터는 별도 이슈). 분개 **차변·대변 합계 일치**는 도메인에서 검증·실패 시 아래 표 참고.
+**참고**: `prod`·스텁 해제 시 `aiModel` 은 `BEDROCK_MODEL_ID`(예: inference profile ID)를 반영한다.
+
+**참고**: 유스케이스는 엔티티 `source`를 코드상 `'manual'`로 넣는다 (DB 의미 정렬은 별도 이슈).
 
 | 에러 케이스 | HTTP | 코드 | 비고 |
 |-------------|------|------|------|
@@ -229,11 +236,13 @@
 | Zod 입력 불일치 (날짜 형식, amount ≤ 0, 문자열 길이 등) | 422 | `VALIDATION_ERROR` | |
 | AI 출력 구조/Zod 검증 실패 (`ClassifyOutputSchema`) | 422 | `VALIDATION_ERROR` | `ZodError` |
 | **차변·대변 불균형** (`createJournalEntry` → `assertBalanced`) | **422** | `UNBALANCED_JOURNAL` | `UnbalancedJournalError` |
-| 일일 분류 호출 한도 초과 (DynamoDB 카운터) | **429** | `BEDROCK_DAILY_LIMIT_EXCEEDED` | `RateLimitError` (환경변수 기본 100/일/사용자) |
-| Bedrock 미응답·툴유스 누락·기타 `Error` | 500 | `INTERNAL_ERROR` | 예: "Bedrock did not return a tool call result" |
-| `createJournalLine` 규칙 위반 (한 라인에 차·대 동시, 둘 다 0, 음수 등) | 500 | `INTERNAL_ERROR` | 현재 일반 `Error` throw |
+| 일일 분류 호출 한도 초과 (DynamoDB 카운터) | **429** | `BEDROCK_DAILY_LIMIT_EXCEEDED` | |
+| Bedrock **스로틀** | **429** | `BEDROCK_THROTTLED` | `ThrottlingException` → `RateLimitError` |
+| Bedrock **미가용**(모델 미승인·리전·use-case 미제출 등) | **503** | `BEDROCK_UNAVAILABLE` | `ResourceNotFoundException`, `AccessDeniedException`, `ServiceUnavailableException` 매핑(`journal-core` classifier) |
+| Bedrock 응답 구조 오류(툴 결과 없음 등)·기타 미처리 `Error` | 500 | `INTERNAL_ERROR` | |
+| `createJournalLine` 규칙 위반 (한 라인에 차·대 동시 양수 등) | **422** | `INVALID_JOURNAL_LINE` | |
 | PG 저장 실패 | 500 | `INTERNAL_ERROR` | |
-| 멱등 충돌(Powertools, `AppError` 미매핑) | 500 | `INTERNAL_ERROR` | `POST /tenants`와 동일 한계 |
+| 멱등 충돌(동일 키·다른 본문) | **409** | `IDEMPOTENCY_KEY_REUSED` | `apps/journal/src/main.ts` 에서 Powertools 검증 오류 매핑 |
 
 ---
 
@@ -241,7 +250,7 @@
 
 | 항목 | 내용 |
 |------|------|
-| **기능** | 호출자가 지정한 **수동 복식분개**를 검증·저장한다. 멤버십만 확인하며, classify와 달리 **시드 계정 강제 실행은 없음**(이미 계정이 있어야 함). |
+| **기능** | 호출자가 지정한 **수동 복식분개**를 검증·저장한다. 멤버십 확인 후 **`findMissingCodes`** 로 계정코드 일괄 검증; 누락 시 저장하지 않는다. 차트가 비어 있으면 유스케이스가 **시드 계정 삽입**을 선행한다 (`ensure-accounts-seeded`). |
 | **인증** | 필수 |
 | **멱등성** | **없음** (`makeIdempotent` 미적용). 동일 요청은 중복 삽입될 수 있음. |
 | **경로 변수** | `tenantId` |
@@ -264,7 +273,7 @@
 }
 ```
 
-스키마상 `lines`는 **최소 2줄**. 각 줄은 스키마만으로는 "차변 XOR 대변"을 강제하지 않음 — **도메인** `createJournalLine`에서 한쪽만 양수여야 하며, 위반 시 500.
+스키마상 `lines`는 **최소 2줄**. 각 줄은 스키마만으로는 "차변 XOR 대변"을 강제하지 않음 — **도메인** `createJournalLine`에서 정확히 한쪽만 양수여야 하며, 위반 시 **422** `INVALID_JOURNAL_LINE`.
 
 **응답 201**:
 
@@ -293,10 +302,11 @@
 | JSON 파싱 실패 | 422 | `VALIDATION_ERROR` | |
 | Zod 불일치 (날짜, lines 개수, 필드 범위 등) | 422 | `VALIDATION_ERROR` | |
 | 차대 불균형 | 422 | `UNBALANCED_JOURNAL` | |
-| 라인 규칙 위반 (`createJournalLine`) | 500 | `INTERNAL_ERROR` | |
+| 존재하지 않는 **계정코드** (`findMissingCodes`) | **422** | **`INVALID_ACCOUNT_CODE`** | |
+| 라인 규칙 위반 (`createJournalLine`) | **422** | **`INVALID_JOURNAL_LINE`** | |
 | DB 오류 | 500 | `INTERNAL_ERROR` | |
 
-**참고**: 도메인에 `InvalidAccountCodeError`(422)가 정의되어 있으나, **현재 저장 경로에서는 사용되지 않음** — 존재하지 않는 계정코드도 DB 제약에 걸릴 때까지 삽입 시도할 수 있음.
+**참고**: 도메인 **`InvalidAccountCodeError`(422)**는 수동 분개 경로에서 **`findMissingCodes`** 로 선행 검증된다.
 
 ---
 
@@ -309,10 +319,14 @@
 | `NOT_FOUND` | 404 | 공용 (Lambda unknown route); 도메인 `TenantNotFoundError` 등은 identity 앱 현재 라우트에서 직접 던지지 않음 |
 | `CONFLICT` | 409 | 테넌트 사업자번호 중복 등 |
 | `VALIDATION_ERROR` | 422 | JSON/Zod/형식 |
+| `INVALID_ACCOUNT_CODE` | 422 | 차트에 없는 계정코드 |
+| `INVALID_JOURNAL_LINE` | 422 | 한 줄 차·대 규칙 위반 |
 | `UNBALANCED_JOURNAL` | 422 | 분개 불일치 |
-| `IDEMPOTENCY_KEY_REUSED` | 409 | 패키지에 정의됨 — **Powertools와 연동 시 별도 매핑 없으면 미사용** |
-| `IDEMPOTENCY_IN_PROGRESS` | 409 | 위와 동일 |
-| `BEDROCK_DAILY_LIMIT_EXCEEDED` | 429 | 일일 AI 한도 |
+| `IDEMPOTENCY_KEY_REUSED` | 409 | 동일 `Idempotency-Key`에 다른 본문 |
+| `IDEMPOTENCY_IN_PROGRESS` | 409 | 동일 키 처리 중 |
+| `BEDROCK_UNAVAILABLE` | 503 | Bedrock 호출 불가(설정·권한·모델 상태) |
+| `BEDROCK_THROTTLED` | 429 | Bedrock API 스로틀 |
+| `BEDROCK_DAILY_LIMIT_EXCEEDED` | 429 | 일일 앱 한도 |
 | `INTERNAL_ERROR` | 500 | 미처리 예외 |
 
 ---

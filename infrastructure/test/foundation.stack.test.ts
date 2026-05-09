@@ -45,8 +45,8 @@ describe('FoundationStack', () => {
     });
   });
 
-  it('should provision a Secrets Manager secret encrypted with the shared CMK when synthesized', () => {
-    template.resourceCountIs('AWS::SecretsManager::Secret', 1);
+  it('should provision Secrets Manager secrets encrypted with the shared CMK when synthesized', () => {
+    template.resourceCountIs('AWS::SecretsManager::Secret', 2);
 
     template.hasResourceProperties('AWS::SecretsManager::Secret', {
       KmsKeyId: Match.anyValue(),

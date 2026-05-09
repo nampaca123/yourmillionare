@@ -75,7 +75,7 @@ export class ApiStack extends Stack {
       runtime: Runtime.NODEJS_20_X,
       architecture: Architecture.ARM_64,
       memorySize: 256,
-      timeout: Duration.seconds(10),
+      timeout: Duration.seconds(30),
       vpc: props.vpc,
       vpcSubnets: { subnetType: SubnetType.PRIVATE_ISOLATED },
       securityGroups: [props.lambdaSg],
@@ -131,6 +131,8 @@ export class ApiStack extends Stack {
         BEDROCK_DAILY_LIMIT_PER_USER: '100',
         COST_COUNTER_TABLE_NAME: props.cache.costCounter.tableName,
         IDEMPOTENCY_TABLE_NAME: props.cache.idempotencyKeys.tableName,
+        TRANSACTION_CACHE_TABLE_NAME: props.cache.transactionCache.tableName,
+        JOURNAL_STUB_CLASSIFIER: props.deploymentEnv === 'dev' ? '1' : '0',
       },
       bundling: {
         externalModules: ['@aws-sdk/*', 'pg-native'],
@@ -157,6 +159,7 @@ export class ApiStack extends Stack {
     );
     props.cache.costCounter.grantReadWriteData(journalFn);
     props.cache.idempotencyKeys.grantReadWriteData(journalFn);
+    props.cache.transactionCache.grantReadWriteData(journalFn);
 
     // --- HTTP API ---
     const jwtAuthorizer = new HttpJwtAuthorizer('JwtAuthorizer', props.identity.issuerUrl, {

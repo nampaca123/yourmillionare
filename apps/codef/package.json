@@ -1,0 +1,13 @@
+{
+  "name": "@ym/codef",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.146",
+    "typescript": "^5.5.4"
+  }
+}

@@ -13,6 +13,8 @@ export interface ClassifyResult {
   readonly lines: JournalLine[];
   readonly confidence: number;
   readonly modelId: string;
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
 }
 
 export interface TransactionClassifier {

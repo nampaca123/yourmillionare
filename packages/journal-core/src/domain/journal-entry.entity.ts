@@ -3,18 +3,27 @@
 import type { JournalLine } from './journal-line.value-object.js';
 import { UnbalancedJournalError } from './journal.errors.js';
 
-export type JournalSource = 'codef_bank' | 'codef_card' | 'codef_fx' | 'codef_hometax' | 'codef_tax_invoice' | 'fx_revaluation' | 'manual';
+export type JournalSource =
+  | 'codef_bank'
+  | 'codef_card'
+  | 'codef_fx'
+  | 'codef_hometax'
+  | 'codef_tax_invoice'
+  | 'fx_revaluation'
+  | 'manual';
 
 export interface JournalEntry {
   readonly id?: string;
   readonly tenantId: string;
   readonly entryDate: string;
+  readonly postingDate?: string;
   readonly source: JournalSource;
   readonly description?: string;
   readonly lines: JournalLine[];
   readonly aiConfidence?: number;
   readonly aiModel?: string;
   readonly createdBy?: string;
+  readonly sourceRefId?: string;
 }
 
 export const assertBalanced = (lines: JournalLine[]): void => {

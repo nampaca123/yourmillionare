@@ -1,7 +1,7 @@
 // Fake TransactionClassifier for unit tests with configurable responses.
 
-import type { TransactionClassifier, ClassifyInput, ClassifyResult } from '../../src/application/ports/transaction-classifier.port.js';
-import { createJournalLine } from '../../src/domain/journal-line.value-object.js';
+import type { ClassifyInput, ClassifyResult, TransactionClassifier } from '@ym/journal-core';
+import { createJournalLine } from '@ym/journal-core';
 
 export class FakeTransactionClassifier implements TransactionClassifier {
   private response: ClassifyResult = {
