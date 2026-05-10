@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 
 import { CfnOutput, Duration, Stack } from 'aws-cdk-lib';
 import type { StackProps } from 'aws-cdk-lib';
-import { HttpApi, HttpMethod } from 'aws-cdk-lib/aws-apigatewayv2';
+import { CorsHttpMethod, HttpApi, HttpMethod } from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpJwtAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import type { ISecurityGroup, IVpc } from 'aws-cdk-lib/aws-ec2';
@@ -171,8 +171,24 @@ export class ApiStack extends Stack {
       jwtAudience: [props.identity.userPoolClient.userPoolClientId],
     });
 
+    const corsAllowedOrigins = (process.env.API_CORS_ALLOWED_ORIGINS ?? 'http://localhost:3000,http://localhost:5173')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
     this.httpApi = new HttpApi(this, 'HttpApi', {
       createDefaultStage: true,
+      corsPreflight: {
+        allowOrigins: corsAllowedOrigins,
+        allowMethods: [
+          CorsHttpMethod.GET,
+          CorsHttpMethod.POST,
+          CorsHttpMethod.OPTIONS,
+        ],
+        allowHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key'],
+        allowCredentials: false,
+        maxAge: Duration.minutes(10),
+      },
     });
 
     // Attach access logs to the default stage (stable CDK pattern)
