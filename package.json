@@ -13,6 +13,8 @@
   ],
   "scripts": {
     "synth": "npm run synth --workspace=@ym/infrastructure",
+    "build:packages": "rm -f packages/journal-core/tsconfig.tsbuildinfo && npm run build --workspace=packages/journal-core",
+    "pretest": "npm run build:packages",
     "test": "npm run test --workspaces --if-present",
     "lint": "eslint --no-error-on-unmatched-pattern \"infrastructure/**/*.ts\" \"apps/**/*.ts\"",
     "format": "prettier --write \"infrastructure/**/*.{ts,json}\" \"apps/**/*.{ts,json}\""
