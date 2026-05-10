@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(aws cloudformation describe-stacks *)",
+      "Bash(aws cloudformation list-stacks *)",
+      "Bash(aws cloudformation describe-stack-resources *)",
+      "Bash(aws cloudformation describe-stack-events *)",
+      "Bash(aws sts get-caller-identity)",
+      "Bash(aws cognito-idp list-identity-providers *)",
+      "Bash(aws cognito-idp describe-user-pool *)",
+      "Bash(aws cognito-idp describe-user-pool-client *)",
+      "Bash(aws cognito-idp admin-initiate-auth *)",
+      "Bash(aws cognito-idp admin-set-user-password *)",
+      "Bash(aws cognito-idp list-users *)",
+      "Bash(aws secretsmanager describe-secret *)",
+      "Bash(aws secretsmanager list-secrets *)",
+      "Bash(aws secretsmanager put-secret-value *)",
+      "Bash(aws apigatewayv2 get-routes *)",
+      "Bash(aws apigatewayv2 get-apis *)",
+      "Bash(aws stepfunctions list-state-machines *)",
+      "Bash(aws stepfunctions describe-state-machine *)",
+      "Bash(aws stepfunctions describe-execution *)",
+      "Bash(aws stepfunctions list-executions *)",
+      "Bash(aws stepfunctions start-execution *)",
+      "Bash(aws sqs send-message *)",
+      "Bash(aws sqs send-message-batch *)",
+      "Bash(aws sqs get-queue-attributes *)",
+      "Bash(aws sqs purge-queue *)",
+      "Bash(aws logs filter-log-events *)",
+      "Bash(aws logs describe-log-streams *)",
+      "Bash(aws logs describe-log-groups *)",
+      "Bash(aws logs get-log-events *)",
+      "Bash(aws rds-data execute-statement *)",
+      "Bash(npx --workspace=@ym/infrastructure cdk deploy *)",
+      "Bash(npx --workspace=@ym/infrastructure cdk diff *)",
+      "Bash(npx --workspace=@ym/infrastructure cdk synth *)",
+      "Bash(./scripts/sync-secrets-from-env.sh*)",
+      "Bash(./scripts/run-codef-e2e.sh*)",
+      "Bash(bash scripts/sync-secrets-from-env.sh*)",
+      "Bash(bash scripts/run-codef-e2e.sh*)"
+    ]
+  }
+}

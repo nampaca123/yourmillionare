@@ -2,6 +2,8 @@
 set -euo pipefail
 
 # Copies CODEF / ECOS JSON payloads from `.env` into Secrets Manager ARNs referenced by Ym stacks.
+# Required in .env: raw credentials (CODEF_CLIENT_ID/SECRET/PUBLIC_KEY, ECOS_API_KEY) and
+# the Secret ARNs (CODEF_CREDENTIAL_SECRET_ARN, ECOS_CREDENTIAL_SECRET_ARN) emitted by CDK.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${1:-${ROOT}/.env}"
@@ -26,8 +28,18 @@ require_var() {
 
 require_var CODEF_CREDENTIAL_SECRET_ARN
 require_var ECOS_CREDENTIAL_SECRET_ARN
-require_var CODEF_CREDENTIAL_SECRET_JSON
-require_var ECOS_CREDENTIAL_SECRET_JSON
+require_var CODEF_CLIENT_ID
+require_var CODEF_CLIENT_SECRET
+require_var CODEF_PUBLIC_KEY
+require_var ECOS_API_KEY
+
+CODEF_CREDENTIAL_SECRET_JSON=$(jq -n \
+  --arg cid "${CODEF_CLIENT_ID}" \
+  --arg cs  "${CODEF_CLIENT_SECRET}" \
+  --arg pk  "${CODEF_PUBLIC_KEY}" \
+  '{clientId:$cid,clientSecret:$cs,publicKey:$pk}')
+
+ECOS_CREDENTIAL_SECRET_JSON=$(jq -n --arg key "${ECOS_API_KEY}" '{apiKey:$key}')
 
 aws secretsmanager put-secret-value \
   --secret-id "${CODEF_CREDENTIAL_SECRET_ARN}" \

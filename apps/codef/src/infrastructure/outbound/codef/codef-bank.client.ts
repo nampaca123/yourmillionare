@@ -7,7 +7,7 @@ import { getAccessToken } from './codef-auth.client.js';
 const CODEF_API_BASE = 'https://development.codef.io';
 const TRANSACTION_LIST_PATH = '/v1/kr/bank/p/account/transaction-list';
 
-const CODEF_SUCCESS_CODE = '00000';
+const CODEF_SUCCESS_CODE = 'CF-00000';
 
 const parseKrwAmount = (raw: string): number => {
   const n = parseInt(raw.replace(/,/g, ''), 10);
@@ -56,7 +56,8 @@ export const fetchTransactions = async (params: {
     throw new AppError(502, 'CODEF_API_ERROR', 'External service error.', `CODEF API HTTP ${response.status}`);
   }
 
-  const data = await response.json() as CodefTxResponse;
+  // CODEF responses are URL-encoded; raw text + decodeURIComponent + JSON.parse is required.
+  const data = JSON.parse(decodeURIComponent(await response.text())) as CodefTxResponse;
 
   if (data.result.code !== CODEF_SUCCESS_CODE) {
     throw new AppError(

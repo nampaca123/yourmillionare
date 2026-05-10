@@ -18,8 +18,10 @@ import { VerifyTenantMembershipUseCase } from './application/verify-tenant-membe
 import { EnsureAccountsSeededUseCase } from './application/ensure-accounts-seeded.use-case.js';
 import { ClassifyTransactionUseCase } from './application/classify-transaction.use-case.js';
 import { CreateJournalEntryUseCase } from './application/create-journal-entry.use-case.js';
+import { ListJournalEntriesUseCase } from './application/list-journal-entries.use-case.js';
 import { buildClassifyController } from './infrastructure/inbound/http/classify.controller.js';
 import { buildCreateEntryController } from './infrastructure/inbound/http/create-entry.controller.js';
+import { buildListEntriesController } from './infrastructure/inbound/http/list-entries.controller.js';
 import { buildPersistenceStore, buildIdempotencyConfig } from './infrastructure/inbound/http/idempotency.config.js';
 
 export type Handler = (event: APIGatewayProxyEventV2WithJWTAuthorizer) => Promise<APIGatewayProxyResultV2> | APIGatewayProxyResultV2;
@@ -42,9 +44,11 @@ const verifyMembership = new VerifyTenantMembershipUseCase(memberRepo);
 const ensureSeeded = new EnsureAccountsSeededUseCase(accountRepo);
 const classifyTransaction = new ClassifyTransactionUseCase(classifier, journalRepo, costCounter, DAILY_LIMIT);
 const createEntry = new CreateJournalEntryUseCase(journalRepo, accountRepo, cacheProjector);
+const listEntries = new ListJournalEntriesUseCase(verifyMembership, journalRepo);
 
 const classifyController = buildClassifyController(ensureUser, verifyMembership, ensureSeeded, classifyTransaction);
 const createEntryController = buildCreateEntryController(ensureUser, verifyMembership, ensureSeeded, createEntry);
+const listEntriesController = buildListEntriesController(ensureUser, listEntries);
 
 const classifyPersistence = buildPersistenceStore('journal-classify');
 const classifyIdempotencyConfig = buildIdempotencyConfig(
@@ -75,5 +79,6 @@ export const container = {
   routes: {
     'POST /tenants/{tenantId}/journal/classify': classifyWithIdempotencyMapped,
     'POST /tenants/{tenantId}/journal/entries': createEntryController,
+    'GET /tenants/{tenantId}/journal/entries': listEntriesController,
   } as Record<string, Handler>,
 };

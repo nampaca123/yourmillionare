@@ -25,7 +25,7 @@ const DATABASE = process.env.DATABASE_NAME ?? 'yourmillionare';
 const REGION = process.env.APP_REGION ?? process.env.AWS_REGION ?? 'ap-northeast-2';
 const PHYSICAL_ID = 'verifier-schema';
 
-const EXPECTED_TABLE_COUNT = 12;
+const EXPECTED_TABLE_COUNT = 13;
 
 // Exact whitelist of (tablename:policyname) pairs that must exist after all migrations.
 // Removing or renaming any policy causes deployment to fail — intentional regression gate.
@@ -50,6 +50,8 @@ const EXPECTED_POLICIES: ReadonlySet<string> = new Set([
   'ai_decisions:tenant_isolation',
   'tenant_bank_accounts:tenant_isolation',
   'tenant_bank_accounts:system_select',
+  'tenant_bank_connections:tenant_isolation',
+  'tenant_bank_connections:system_select',
 ]);
 
 export const handler = async (event: CfnEvent): Promise<{ PhysicalResourceId: string }> => {

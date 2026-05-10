@@ -1,13 +1,37 @@
 // PostgreSQL JournalRepository: persists journal entries and lines in a single transaction.
 
 import type { PoolClient } from 'pg';
-import type { JournalEntry, JournalRepository } from '@ym/journal-core';
+import type { JournalEntry, JournalRepository, JournalEntrySummary } from '@ym/journal-core';
 import { ValidationError } from '@ym/shared-errors';
 import { withRlsContext } from './pg-rls.context.js';
 
 interface EntryRow {
   id: string;
 }
+
+interface ListRow {
+  id: string;
+  entry_date: Date;
+  source: string;
+  description: string | null;
+  ai_confidence: string | null;
+  ai_model: string | null;
+  source_ref_id: string | null;
+  lines: Array<{
+    line_no: number;
+    account_code: string;
+    debit: string;
+    credit: string;
+    memo: string | null;
+  }>;
+}
+
+const formatDate = (d: Date): string => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
 
 export class PgJournalRepository implements JournalRepository {
   async existsBySourceRef(client: PoolClient, tenantId: string, rawTransactionId: string): Promise<boolean> {
@@ -96,5 +120,66 @@ export class PgJournalRepository implements JournalRepository {
 
       return { ...entry, id: entryId };
     });
+  }
+
+  async list(params: {
+    tenantId: string;
+    userId: string;
+    cognitoSub: string;
+    fromDate: string;
+    toDate: string;
+    limit: number;
+    offset: number;
+  }): Promise<JournalEntrySummary[]> {
+    return withRlsContext(
+      { userId: params.userId, cognitoSub: params.cognitoSub, tenantId: params.tenantId },
+      async (c: PoolClient) => {
+        const result = await c.query<ListRow>(
+          `SELECT je.id,
+                  je.entry_date,
+                  je.source,
+                  je.description,
+                  je.ai_confidence,
+                  je.ai_model,
+                  je.source_ref_id,
+                  COALESCE(
+                    json_agg(
+                      json_build_object(
+                        'line_no', jl.line_no,
+                        'account_code', jl.account_code,
+                        'debit', jl.debit,
+                        'credit', jl.credit,
+                        'memo', jl.memo
+                      ) ORDER BY jl.line_no
+                    ) FILTER (WHERE jl.entry_id IS NOT NULL),
+                    '[]'::json
+                  ) AS lines
+           FROM journal_entries je
+           LEFT JOIN journal_lines jl ON jl.entry_id = je.id
+           WHERE je.tenant_id = $1
+             AND je.entry_date BETWEEN $2 AND $3
+           GROUP BY je.id
+           ORDER BY je.entry_date DESC, je.id DESC
+           LIMIT $4 OFFSET $5`,
+          [params.tenantId, params.fromDate, params.toDate, params.limit, params.offset],
+        );
+        return result.rows.map((row) => ({
+          id: row.id,
+          entryDate: formatDate(row.entry_date),
+          source: row.source,
+          description: row.description,
+          aiConfidence: row.ai_confidence === null ? null : Number(row.ai_confidence),
+          aiModel: row.ai_model,
+          sourceRefId: row.source_ref_id,
+          lines: row.lines.map((l) => ({
+            lineNo: l.line_no,
+            accountCode: l.account_code,
+            debit: Number(l.debit),
+            credit: Number(l.credit),
+            memo: l.memo,
+          })),
+        }));
+      },
+    );
   }
 }

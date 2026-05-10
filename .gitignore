@@ -35,3 +35,9 @@ cdk.out/
 # OS
 .DS_Store
 Thumbs.db
+
+# E2E test artifacts (contain real user/bank data — do NOT commit)
+docs/api-e2e-raw.ndjson
+docs/api-e2e-meta.json
+docs/codef-e2e-raw.ndjson
+docs/codef-e2e-meta.json

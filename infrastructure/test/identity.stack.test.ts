@@ -18,6 +18,11 @@ const buildStack = (env: 'dev' | 'prod' = 'dev') => {
   const stack = new IdentityStack(app, 'Ym-Identity', {
     env: { account: TEST_ACCOUNT, region: TEST_REGION },
     deploymentEnv: env,
+    googleClientId: 'test-google-client',
+    googleClientSecret: 'test-google-secret',
+    cognitoDomainPrefix: `yourmillionare-${env}-test`,
+    callbackUrls: ['http://localhost:3000/callback'],
+    logoutUrls: ['http://localhost:3000/'],
   });
 
   Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));

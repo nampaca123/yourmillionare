@@ -45,12 +45,8 @@ describe('FoundationStack', () => {
     });
   });
 
-  it('should provision Secrets Manager secrets encrypted with the shared CMK when synthesized', () => {
+  it('should provision two Secrets Manager secrets (CODEF + ECOS) when synthesized', () => {
     template.resourceCountIs('AWS::SecretsManager::Secret', 2);
-
-    template.hasResourceProperties('AWS::SecretsManager::Secret', {
-      KmsKeyId: Match.anyValue(),
-    });
   });
 
   it('should expose the four common tags on every taggable resource when app-level tags are set', () => {

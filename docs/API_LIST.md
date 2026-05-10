@@ -10,7 +10,7 @@
 |------|------|
 | **인프라** | Foundation, Network, Data(Aurora + 마이그레이션 **0006–0009** + DynamoDB), Identity(Cognito), Api(HTTP API + JWT + Identity/Journal Lambda), **Ingestion(CODEF 실연동, SFN+SQS+Lambda VPC 배포)** — `docs/STATUS.md` |
 | **백엔드 앱** | `apps/identity`, `apps/journal`, `apps/codef`, **`packages/journal-core`**, `packages/shared-errors` |
-| **진행 단계** | Slice 6: CODEF 실연동(SFN→CODEF→SQS→Bedrock→Aurora), `tenant_bank_accounts` 테이블, `POST /tenants/{tenantId}/bank-accounts` API |
+| **진행 단계** | Slice 6 완료: CODEF 실연동 + 개인 사용자 온보딩(personal tenant 자동 발급) + 2단계 은행 연결 흐름 (`POST /bank-connections` 인증/디스커버리 → `POST /bank-accounts` 계좌 confirm) → SFN → CODEF → SQS → Bedrock → Aurora → `GET /journal/entries` 조회 |
 | **공통 인증** | Cognito **ID Token**만 통과 (`aud` = User Pool Client ID). Access Token은 사용하지 않는다. |
 
 라우트는 `infrastructure/lib/stacks/api.stack.ts`에 정의되며, Identity Lambda와 Journal Lambda가 `routeKey`로 분기한다.
@@ -98,9 +98,12 @@ Powertools 예외는 Identity/Journal `main.ts`의 라우트 래퍼에서 위 `A
 {
   "id": "uuid",
   "cognitoSub": "uuid",
-  "email": "user@example.com"
+  "email": "user@example.com",
+  "defaultTenantId": "uuid"
 }
 ```
+
+`defaultTenantId`는 호출자의 **personal tenant**(BizRegNo 없이 자동 발급되는 단일 워크스페이스)이다. 첫 호출 시 자동 생성되며, 이후 같은 사용자는 항상 같은 tenant를 받는다 (idempotent). 법인 사용자는 별도로 `POST /tenants`로 BRN 기반 tenant를 추가 생성할 수 있다.
 
 | 에러 케이스 | HTTP | 코드 |
 |-------------|------|------|
@@ -125,11 +128,11 @@ Powertools 예외는 Identity/Journal `main.ts`의 라우트 래퍼에서 위 `A
 {
   "legalName": "string, 1–100자",
   "displayName": "string, 1–100자",
-  "bizRegNo": "string, 1–12자 — 하이픈 유무와 무관하게 내부에서 10자리 숫자 형식으로 정규화·검증"
+  "bizRegNo": "string, 1–12자 (선택) — 생략 시 personal tenant. 입력 시 하이픈 유무 무관하게 내부에서 10자리 숫자 형식으로 정규화·검증"
 }
 ```
 
-**참고**: 스키마는 길이만 제한하고, **유효한 한국 사업자등록번호 형식**은 유스케이스의 `parseBizRegNo`에서 검사한다 (정규화 후 `NNN-NN-NNNNN`).
+**참고**: `bizRegNo`는 **선택 필드**다. 생략하면 `business_type='personal'`로 저장되어 BRN 없는 1인 사용자도 가입 가능하다 (개인 워크스페이스). 입력 시 스키마는 길이만 제한하고, **유효한 한국 사업자등록번호 형식**은 유스케이스의 `parseBizRegNo`에서 검사한다 (정규화 후 `NNN-NN-NNNNN`). 첫 `GET /me` 호출이 personal tenant를 자동 발급하므로, 일반 사용자는 이 엔드포인트를 명시 호출할 필요가 없다.
 
 | **응답 201** | |
 
@@ -310,11 +313,54 @@ Powertools 예외는 Identity/Journal `main.ts`의 라우트 래퍼에서 위 `A
 
 ---
 
-### 3.7 `POST /tenants/{tenantId}/bank-accounts`
+### 3.7 `POST /tenants/{tenantId}/bank-connections`
 
 | 항목 | 내용 |
 |------|------|
-| **기능** | 테넌트에 CODEF 수집 대상 **은행 계좌를 등록**한다. 등록된 계좌는 Ingestion 파이프라인(`TenantsListFn → CodefFetchFn`)이 주기적으로 조회하여 거래내역을 수집한다. |
+| **기능** | 사용자의 은행 자격증명(현재 신한은행 ID/PW, loginType=1)을 **CODEF에 한 번 인증**해 `connectedId`를 발급받고, 같은 호출에서 해당 은행에 보유한 **계좌 리스트를 디스커버리**해 반환한다. `connectedId`는 `tenant_bank_connections`에 영속 저장되어 이후 후속 호출에서 재사용된다. |
+| **인증** | 필수 (ID Token) |
+| **멱등성** | 같은 `(tenantId, organization)`로 재호출 시 connection 행이 UPSERT되며 가장 최신 `connectedId`로 갱신. **신한은 5회 PW 오류 시 인터넷뱅킹 잠금** — 클라이언트가 무분별하게 재시도하지 않도록 주의. |
+| **경로 변수** | `tenantId`: UUID 문자열 |
+
+**요청 본문**:
+
+```json
+{
+  "organization": "string, 정확히 4자 — CODEF 기관코드 (예: '0088'=신한)",
+  "loginId":      "string, 1–100자 — 은행 인터넷뱅킹 ID",
+  "loginPassword":"string, 1–200자 — 평문. 서버에서 RSA-PKCS1로 즉시 암호화 후 CODEF 전송, 메모리 즉시 스코프 해제, 로그 미포함",
+  "birthDate":    "string, 8자리 YYYYMMDD (선택) — 신한이 PW 오류 누적 시 추가 검증을 위해 요구하는 경우"
+}
+```
+
+**응답 200**:
+
+```json
+{
+  "connectionId": "uuid",
+  "accounts": [
+    { "accountNumber": "110-xxx-xxxxxx", "accountName": "신한 SOL 통장", "balance": "1234567" },
+    { "accountNumber": "110-yyy-yyyyyy", "accountName": "...",        "balance": "..." }
+  ]
+}
+```
+
+| 에러 케이스 | HTTP | 코드 | 비고 |
+|-------------|------|------|------|
+| 비멤버 테넌트 | 403 | `FORBIDDEN` | |
+| 본문 누락/형식 오류 | 422 | `VALIDATION_ERROR` | Zod |
+| CODEF 인증 실패 (잘못된 ID/PW 등) | 502 | `CODEF_ACCOUNT_ERROR` | `userError` 02–04 누적 시 메시지에 잠금 경고 포함 |
+| CODEF account-list 실패 | 502 | `CODEF_API_ERROR` | |
+
+> **보안 트레이드오프 (Phase 0/MVP)**: 사용자의 은행 평문 비밀번호가 Identity Lambda 메모리를 잠시 경유한다. 노출 최소화: HTTPS 전송 → CODEF 공개키로 RSA-PKCS1 암호화 → 즉시 스코프 해제 → 로그 미포함. Phase 1에서 CODEF 인증서 팝업 또는 간편인증으로 교체 예정. 자세한 내용은 `docs/STATUS.md` 참조.
+
+---
+
+### 3.8 `POST /tenants/{tenantId}/bank-accounts`
+
+| 항목 | 내용 |
+|------|------|
+| **기능** | `bank-connections`에서 발견된 계좌 중 **모니터링할 계좌 하나**를 선택(confirm)해 `tenant_bank_accounts`에 저장한다. 자격증명 재입력 없이 `(tenantId, organization)`의 캐시된 `connectedId`가 자동으로 결합된다. 등록된 계좌는 Ingestion 파이프라인이 주기적으로 조회한다. |
 | **인증** | 필수 (ID Token) |
 | **멱등성** | 없음 — 동일 `(tenantId, organization, accountNumber)` 재등록 시 **409** |
 | **경로 변수** | `tenantId`: UUID 문자열 |
@@ -323,7 +369,7 @@ Powertools 예외는 Identity/Journal `main.ts`의 라우트 래퍼에서 위 `A
 
 ```json
 {
-  "organization": "string, 정확히 4자 — CODEF 기관코드 (예: '0088'=신한, '0020'=우리)",
+  "organization": "string, 정확히 4자",
   "accountNumber": "string, 1–50자"
 }
 ```
@@ -335,22 +381,65 @@ Powertools 예외는 Identity/Journal `main.ts`의 라우트 래퍼에서 위 `A
   "id": "uuid",
   "tenantId": "uuid",
   "organization": "0088",
-  "accountNumber": "110-123-456789",
+  "accountNumber": "110443478154",
   "isActive": true
 }
 ```
 
 | 에러 케이스 | HTTP | 코드 | 비고 |
 |-------------|------|------|------|
-| API Gateway JWT 실패 | 401 | (Gateway) | |
-| JWT 클레임 불일치 | 401 | `UNAUTHORIZED` | |
-| 비멤버 테넌트 | 403 | `FORBIDDEN` | `AddBankAccountUseCase` — 해당 테넌트 멤버가 아님 |
-| 본문 JSON 파싱 실패 | 422 | `VALIDATION_ERROR` | |
+| 비멤버 테넌트 | 403 | `FORBIDDEN` | |
+| `(tenantId, organization)` connection 없음 | 422 | `NO_BANK_CONNECTION` | 먼저 `POST /bank-connections` 필요 |
 | `organization` 4자리 아님 / `accountNumber` 비어 있음 | 422 | `VALIDATION_ERROR` | Zod |
 | 동일 `(tenantId, organization, accountNumber)` 이미 존재 | 409 | `CONFLICT` | DB `23505` unique 위반 |
-| DB 오류 | 500 | `INTERNAL_ERROR` | |
 
-> **파이프라인 연결**: 이 엔드포인트로 계좌를 등록한 뒤 `connectedIds` Secret에 해당 테넌트의 CODEF `connectedId`를 추가해야 `CodefFetchFn`이 실제 거래내역을 수집한다. Ingestion 파이프라인은 HTTP API가 아님 — Step Functions(6시간 주기) + SQS + Lambda로 동작하며, 파이프라인 오류는 `ClassifyDlqDepthAlarm` CloudWatch 알람으로 모니터링한다.
+> **파이프라인 연결**: `tenant_bank_accounts.connected_id`가 자동 채워지므로, Ingestion `CodefFetchFn`은 별도 Secret 주입 없이 DB만 보고 거래내역 수집을 시작한다. Ingestion은 Step Functions 6h 스케줄 + 수동 트리거(`aws stepfunctions start-execution`)로 실행되며 SQS + Lambda로 워커 처리, 알람은 `ClassifyDlqDepthAlarm`.
+
+---
+
+### 3.9 `GET /tenants/{tenantId}/journal/entries`
+
+| 항목 | 내용 |
+|------|------|
+| **기능** | 테넌트의 분개 결과를 날짜 범위로 조회한다. CODEF가 수집하고 Bedrock(또는 dev stub)이 분류해 저장한 entries + 각 entry의 lines를 반환한다. |
+| **인증** | 필수 (ID Token) |
+| **경로 변수** | `tenantId`: UUID 문자열 |
+
+**요청 쿼리**:
+
+```
+?from=YYYY-MM-DD     (필수)
+&to=YYYY-MM-DD       (필수)
+&limit=N             (선택, 1–100, default 20)
+&offset=N            (선택, default 0)
+```
+
+**응답 200**:
+
+```json
+{
+  "entries": [
+    {
+      "id": "uuid",
+      "entryDate": "2026-05-10",
+      "source": "codef_bank",
+      "sourceRefId": "uuid (raw_transactions.id)",
+      "description": "신한체",
+      "aiConfidence": 0.85,
+      "aiModel": "stub.k-ifrs-expense",
+      "lines": [
+        { "lineNo": 1, "accountCode": "5501", "debit": 5000, "credit": 0,    "memo": null },
+        { "lineNo": 2, "accountCode": "1002", "debit": 0,    "credit": 5000, "memo": null }
+      ]
+    }
+  ]
+}
+```
+
+| 에러 케이스 | HTTP | 코드 |
+|-------------|------|------|
+| 비멤버 테넌트 | 403 | `FORBIDDEN` |
+| `from`/`to` 누락 또는 `limit`/`offset` 범위 오류 | 422 | `VALIDATION_ERROR` |
 
 ---
 
@@ -383,8 +472,10 @@ Powertools 예외는 Identity/Journal `main.ts`의 라우트 래퍼에서 위 `A
 | GET | `/me` | Identity | JWT |
 | POST | `/tenants` | Identity | JWT |
 | GET | `/me/tenants` | Identity | JWT |
+| POST | `/tenants/{tenantId}/bank-connections` | Identity | JWT |
 | POST | `/tenants/{tenantId}/bank-accounts` | Identity | JWT |
 | POST | `/tenants/{tenantId}/journal/classify` | Journal | JWT |
 | POST | `/tenants/{tenantId}/journal/entries` | Journal | JWT |
+| GET | `/tenants/{tenantId}/journal/entries` | Journal | JWT |
 
 이 문서는 저장소의 **현재 코드**(`api.stack.ts`, 각 controller/schema/use-case)를 기준으로 작성되었다. 인프라 출력 URL·스테이지 prefix가 붙는 경우가 있으면 실제 호출 시 Base URL을 배포 출력으로 맞춘다.

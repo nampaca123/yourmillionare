@@ -16,6 +16,7 @@ import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
 import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
+import type { ISecret } from 'aws-cdk-lib/aws-secretsmanager';
 import { NagSuppressions } from 'cdk-nag';
 import type { Construct } from 'constructs';
 
@@ -32,6 +33,7 @@ export interface ApiStackProps extends StackProps {
   readonly cache: CacheConstruct;
   readonly identity: IdentityStack;
   readonly sharedKey: IKey;
+  readonly codefSecret: ISecret;
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -69,6 +71,7 @@ export class ApiStack extends Stack {
     });
 
     // --- Identity Lambda ---
+    // PRIVATE_WITH_EGRESS subnet is required: CODEF account/create + account-list need outbound internet via NAT.
     const identityFn = new NodejsFunction(this, 'IdentityFn', {
       entry: IDENTITY_LAMBDA_ENTRY,
       handler: 'handler',
@@ -77,7 +80,7 @@ export class ApiStack extends Stack {
       memorySize: 256,
       timeout: Duration.seconds(30),
       vpc: props.vpc,
-      vpcSubnets: { subnetType: SubnetType.PRIVATE_ISOLATED },
+      vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
       securityGroups: [props.lambdaSg],
       environment: {
         CLUSTER_ENDPOINT: props.aurora.cluster.clusterEndpoint.hostname,
@@ -88,6 +91,7 @@ export class ApiStack extends Stack {
         KMS_BIZREG_KEY_ARN: bizRegKey.keyArn,
         KMS_BIZREG_HMAC_KEY_ARN: bizRegHmacKey.keyArn,
         IDEMPOTENCY_TABLE_NAME: props.cache.idempotencyKeys.tableName,
+        CODEF_SECRET_ARN: props.codefSecret.secretArn,
       },
       bundling: {
         externalModules: ['@aws-sdk/*', 'pg-native'],
@@ -108,6 +112,7 @@ export class ApiStack extends Stack {
     bizRegKey.grantEncryptDecrypt(identityFn);
     bizRegHmacKey.grant(identityFn, 'kms:GenerateMac', 'kms:VerifyMac');
     props.cache.idempotencyKeys.grantReadWriteData(identityFn);
+    props.codefSecret.grantRead(identityFn);
 
     // --- Journal Lambda ---
     // PRIVATE_WITH_EGRESS subnet is required: Bedrock API calls need outbound internet via NAT.
@@ -204,6 +209,7 @@ export class ApiStack extends Stack {
       [HttpMethod.GET, '/me'],
       [HttpMethod.POST, '/tenants'],
       [HttpMethod.GET, '/me/tenants'],
+      [HttpMethod.POST, '/tenants/{tenantId}/bank-connections'],
       [HttpMethod.POST, '/tenants/{tenantId}/bank-accounts'],
     ] as [HttpMethod, string][]) {
       this.httpApi.addRoutes({
@@ -218,6 +224,7 @@ export class ApiStack extends Stack {
     for (const [method, path] of [
       [HttpMethod.POST, '/tenants/{tenantId}/journal/classify'],
       [HttpMethod.POST, '/tenants/{tenantId}/journal/entries'],
+      [HttpMethod.GET, '/tenants/{tenantId}/journal/entries'],
     ] as [HttpMethod, string][]) {
       this.httpApi.addRoutes({
         path,

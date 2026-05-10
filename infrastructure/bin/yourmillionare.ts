@@ -14,12 +14,27 @@ import { IngestionStack } from '../lib/stacks/ingestion.stack.js';
 const config = loadEnvConfig();
 const env = { account: config.account, region: config.region };
 
+const googleClientId = process.env.GOOGLE_OAUTH_CLIENT ?? '';
+const googleClientSecret = process.env.GOOGLE_OAUTH_SECRET ?? '';
+if (!googleClientId || !googleClientSecret) {
+  throw new Error('GOOGLE_OAUTH_CLIENT and GOOGLE_OAUTH_SECRET must be set in the environment for IdentityStack.');
+}
+
+const cognitoDomainPrefix = process.env.COGNITO_DOMAIN_PREFIX
+  ?? `yourmillionare-${config.env}`;
+
+const callbackUrls = (process.env.COGNITO_CALLBACK_URLS ?? '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+const logoutUrls = (process.env.COGNITO_LOGOUT_URLS ?? '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 const app = new App();
 
 // Pre-populate AZ context so Vpc does not emit a "missing context" entry.
-// CDK's Vpc always requests this lookup even when availabilityZones is passed
-// explicitly; without the cached value CDK CLI tries to call EC2 DescribeAZs at
-// synth time, which fails in CI (dummy account, no credentials).
 const regionAzs = [`${config.region}a`, `${config.region}b`, `${config.region}c`];
 app.node.setContext(`availability-zones:account=${config.account}:region=${config.region}`, regionAzs);
 
@@ -56,6 +71,11 @@ data.addDependency(foundation);
 const identity = new IdentityStack(app, `${config.stackPrefix}-Identity`, {
   env,
   deploymentEnv: config.env,
+  googleClientId,
+  googleClientSecret,
+  cognitoDomainPrefix,
+  callbackUrls,
+  logoutUrls,
 });
 identity.addDependency(foundation);
 
@@ -68,10 +88,12 @@ const api = new ApiStack(app, `${config.stackPrefix}-Api`, {
   cache: data.cache,
   identity,
   sharedKey: foundation.sharedKey,
+  codefSecret: foundation.codefCredentialSecret,
 });
 api.addDependency(network);
 api.addDependency(data);
 api.addDependency(identity);
+api.addDependency(foundation);
 
 const ingestion = new IngestionStack(app, `${config.stackPrefix}-Ingestion`, {
   env,
@@ -79,11 +101,12 @@ const ingestion = new IngestionStack(app, `${config.stackPrefix}-Ingestion`, {
   vpc: network.vpc,
   lambdaSg: network.lambdaSg,
   aurora: data.aurora,
-  codefSecretArn: 'arn:aws:secretsmanager:ap-northeast-2:823401933116:secret:CodefCredentialSecret7E1320-XiBlOcErWWsI-brY9xT',
+  codefSecretArn: foundation.codefCredentialSecret.secretArn,
   transactionCache: data.cache.transactionCache,
 });
 ingestion.addDependency(network);
 ingestion.addDependency(data);
+ingestion.addDependency(foundation);
 
 Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));
 

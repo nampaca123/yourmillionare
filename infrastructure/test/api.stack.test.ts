@@ -43,6 +43,11 @@ const buildStack = (env: 'dev' | 'prod' = 'dev') => {
   const identity = new IdentityStack(app, 'Ym-Identity', {
     env: { account: TEST_ACCOUNT, region: TEST_REGION },
     deploymentEnv: env,
+    googleClientId: 'test-google-client',
+    googleClientSecret: 'test-google-secret',
+    cognitoDomainPrefix: `yourmillionare-${env}-test`,
+    callbackUrls: ['http://localhost:3000/callback'],
+    logoutUrls: ['http://localhost:3000/'],
   });
 
   const apiStack = new ApiStack(app, 'Ym-Api', {
@@ -54,6 +59,7 @@ const buildStack = (env: 'dev' | 'prod' = 'dev') => {
     cache: data.cache,
     identity,
     sharedKey: foundation.sharedKey,
+    codefSecret: foundation.codefCredentialSecret,
   });
 
   Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));
@@ -79,8 +85,8 @@ describe('ApiStack (dev)', () => {
     template.resourceCountIs('AWS::ApiGatewayV2::Authorizer', 1);
   });
 
-  it('should create exactly 7 routes when synthesized', () => {
-    template.resourceCountIs('AWS::ApiGatewayV2::Route', 7);
+  it('should create exactly 9 routes when synthesized', () => {
+    template.resourceCountIs('AWS::ApiGatewayV2::Route', 9);
   });
 
   it('should create 1 Lambda function for the identity handler when synthesized', () => {
