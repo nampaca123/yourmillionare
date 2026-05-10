@@ -189,7 +189,7 @@ Powertools 예외는 Identity/Journal `main.ts`의 라우트 래퍼에서 위 `A
 
 | 항목 | 내용 |
 |------|------|
-| **기능** | (1) 멤버십 확인 (2) 차트 비어 있으면 **K-IFRS 시드** (3) **일일 분류 한도**(DynamoDB) (4) **분류기**로 복식 라인 생성 (5) `journal_entries` 저장. **`CDK_ENV=dev`** 배포 시 Lambda 환경변수 **`JOURNAL_STUB_CLASSIFIER=1`** 이면 **`DeterministicStubClassifier`** 가 호출되어 Bedrock 없이 고정 패턴(예: 소모품비/보통예금)으로 균형 분개를 만든다. **`prod`** 는 **`JOURNAL_STUB_CLASSIFIER=0`** + **`BedrockConverseClassifier`**. **`ai_decisions`** 테이블은 마이그레이션만 적용된 상태로, HTTP 경로에서 필수 기록은 아님. |
+| **기능** | (1) 멤버십 확인 (2) 차트 비어 있으면 **K-IFRS 시드** (3) **일일 분류 한도**(DynamoDB) (4) **분류기**로 복식 라인 생성 (5) `journal_entries` 저장. dev/prod **모두 실제 Bedrock(`global.anthropic.claude-sonnet-4-6`)** 사용 — `BedrockConverseClassifier`가 기본. `DeterministicStubClassifier`는 unit test 전용으로만 남아 있고 deploy되는 Lambda 어디에도 wired되지 않는다. **`ai_decisions`** 에 model_id + token usage 기록. |
 | **인증** | 필수 |
 | **멱등성** | 선택 헤더 `Idempotency-Key`. 키가 없으면 멱등 레이어 없이 매번 실행. 키는 **헤더가 있으면 헤더**, 없으면 본문 `date`·`amount`·`counterparty`·`memo`를 결합해 유도된다 (`main.ts`의 JMESPath). TTL 24h. |
 | **경로 변수** | `tenantId`: UUID 문자열 |

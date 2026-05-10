@@ -14,7 +14,7 @@ import { getPool } from '../../outbound/pg/pg-pool.client.js';
 import { findById, markDispatched } from '../../outbound/pg/pg-raw-transaction.repository.js';
 import { logger } from '../../../shared/logging/logger.js';
 
-const CLASSIFY_MODE = process.env.CLASSIFY_MODE ?? 'stub';
+const CLASSIFY_MODE = process.env.CLASSIFY_MODE ?? 'bedrock';
 const SYSTEM_USER_UUID = process.env.SYSTEM_USER_UUID ?? '00000000-0000-0000-0000-000000000001';
 const SOURCE = 'codef_bank' as const;
 

@@ -123,14 +123,12 @@ describe('ApiStack (dev)', () => {
     expect(errors).toEqual([]);
   });
 
-  it('should set journal stub classifier env to 1 for dev', () => {
-    template.hasResourceProperties('AWS::Lambda::Function', {
-      Environment: {
-        Variables: Match.objectLike({
-          JOURNAL_STUB_CLASSIFIER: '1',
-        }),
-      },
-    });
+  it('should not set JOURNAL_STUB_CLASSIFIER on Journal Lambda in dev (Bedrock used everywhere)', () => {
+    const fns = template.findResources('AWS::Lambda::Function');
+    for (const fn of Object.values(fns)) {
+      const vars = (fn as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } }).Properties?.Environment?.Variables ?? {};
+      expect(vars).not.toHaveProperty('JOURNAL_STUB_CLASSIFIER');
+    }
   });
 });
 
@@ -141,13 +139,11 @@ describe('ApiStack (prod)', () => {
     template = buildStack('prod').template;
   });
 
-  it('should set journal stub classifier env to 0 for prod', () => {
-    template.hasResourceProperties('AWS::Lambda::Function', {
-      Environment: {
-        Variables: Match.objectLike({
-          JOURNAL_STUB_CLASSIFIER: '0',
-        }),
-      },
-    });
+  it('should not set JOURNAL_STUB_CLASSIFIER on Journal Lambda in prod', () => {
+    const fns = template.findResources('AWS::Lambda::Function');
+    for (const fn of Object.values(fns)) {
+      const vars = (fn as { Properties?: { Environment?: { Variables?: Record<string, unknown> } } }).Properties?.Environment?.Variables ?? {};
+      expect(vars).not.toHaveProperty('JOURNAL_STUB_CLASSIFIER');
+    }
   });
 });
