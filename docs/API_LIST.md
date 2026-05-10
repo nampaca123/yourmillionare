@@ -8,7 +8,7 @@
 
 | 구분 | 내용 |
 |------|------|
-| **인프라** | Foundation, Network, Data(Aurora + 마이그레이션 **0006–0009** + DynamoDB), Identity(Cognito), Api(HTTP API + JWT + Identity/Journal Lambda), **Ingestion(CODEF 실연동, SFN+SQS+Lambda VPC 배포)** — `docs/STATUS.md` |
+| **인프라** | Foundation, Network, Data(Aurora + 마이그레이션 **0006–0010** + DynamoDB), Identity(Cognito + **Google IdP + Hosted UI domain**), Api(HTTP API + JWT + Identity/Journal Lambda + 신규 routes 2개), **Ingestion(CODEF 실연동 가동, SFN→fetch→SQS→Bedrock→Aurora)** — `docs/STATUS.md` |
 | **백엔드 앱** | `apps/identity`, `apps/journal`, `apps/codef`, **`packages/journal-core`**, `packages/shared-errors` |
 | **진행 단계** | Slice 6 완료: CODEF 실연동 + 개인 사용자 온보딩(personal tenant 자동 발급) + 2단계 은행 연결 흐름 (`POST /bank-connections` 인증/디스커버리 → `POST /bank-accounts` 계좌 confirm) → SFN → CODEF → SQS → Bedrock → Aurora → `GET /journal/entries` 조회 |
 | **공통 인증** | Cognito **ID Token**만 통과 (`aud` = User Pool Client ID). Access Token은 사용하지 않는다. |
@@ -212,8 +212,8 @@ Powertools 예외는 Identity/Journal `main.ts`의 라우트 래퍼에서 위 `A
   "id": "uuid",
   "tenantId": "uuid",
   "entryDate": "YYYY-MM-DD",
-  "aiConfidence": 0.85,
-  "aiModel": "stub.k-ifrs-expense",
+  "aiConfidence": 0.72,
+  "aiModel": "global.anthropic.claude-sonnet-4-6",
   "lines": [
     {
       "lineNo": 1,
@@ -425,10 +425,10 @@ Powertools 예외는 Identity/Journal `main.ts`의 라우트 래퍼에서 위 `A
       "source": "codef_bank",
       "sourceRefId": "uuid (raw_transactions.id)",
       "description": "신한체",
-      "aiConfidence": 0.85,
-      "aiModel": "stub.k-ifrs-expense",
+      "aiConfidence": 0.6,
+      "aiModel": "global.anthropic.claude-sonnet-4-6",
       "lines": [
-        { "lineNo": 1, "accountCode": "5501", "debit": 5000, "credit": 0,    "memo": null },
+        { "lineNo": 1, "accountCode": "5401", "debit": 5000, "credit": 0,    "memo": null },
         { "lineNo": 2, "accountCode": "1002", "debit": 0,    "credit": 5000, "memo": null }
       ]
     }

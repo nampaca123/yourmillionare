@@ -4,12 +4,12 @@
 
 | 스택 | 상태 | 비고 |
 |------|------|------|
-| `Ym-Dev-Foundation` | ✅ DEPLOYED | KMS CMK, **CODEF + ECOS** Secrets 슬롯 |
+| `Ym-Dev-Foundation` | ✅ DEPLOYED | KMS CMK, **CODEF + ECOS** Secrets 슬롯 (CMK는 AWS-managed로 정리됨) |
 | `Ym-Dev-Network` | ✅ DEPLOYED | VPC, SG, VPC Endpoints, NAT Instance, PRIVATE_WITH_EGRESS |
-| `Ym-Dev-Data` | ✅ DEPLOYED | Aurora + schema + migrations (**0006–0008**) + DynamoDB |
-| `Ym-Dev-Identity` | ✅ DEPLOYED | Cognito User Pool + Client |
-| `Ym-Dev-Api` | ✅ DEPLOYED | HTTP API + Identity/Journal Lambda (**journal-core**, transaction cache env) |
-| `Ym-Dev-Ingestion` | 🆕 CDK | CODEF EDA **스켈레톤** (SFN+SQS+스케줄+DLQ 알람), 실 로직은 후속 |
+| `Ym-Dev-Data` | ✅ DEPLOYED | Aurora + schema + migrations (**0006–0010**) + DynamoDB + verifier (13 tables) |
+| `Ym-Dev-Identity` | ✅ DEPLOYED | Cognito User Pool + Client + **Hosted UI domain + Google IdP** |
+| `Ym-Dev-Api` | ✅ DEPLOYED | HTTP API + Identity (PRIVATE_WITH_EGRESS) / Journal Lambda + 신규 routes 2개 |
+| `Ym-Dev-Ingestion` | ✅ DEPLOYED | CODEF EDA **실연동 가동** (SFN→fetch→SQS→Bedrock classify→Aurora) |
 
 ---
 
@@ -35,7 +35,7 @@ Slice 5 범위: **journal-core**, **캐시 projector**, **마이그레이션(ai_
 
 ---
 
-## Slice 6 — CODEF 실연동 (개인 사용자 + ID/PW MVP)
+## Slice 6 — CODEF 실연동 (개인 사용자 + ID/PW MVP) ✅ COMPLETE
 
 | 항목 | 상태 |
 |------|------|
@@ -44,8 +44,13 @@ Slice 5 범위: **journal-core**, **캐시 projector**, **마이그레이션(ai_
 | `POST /tenants/{id}/bank-accounts` (계좌 confirm) | ✅ 사전 connection 필요, connectedId 자동 첨부 |
 | `GET /tenants/{id}/journal/entries` | ✅ from/to/limit/offset, 멤버십 검증, lines join |
 | Identity Lambda 서브넷 PRIVATE_WITH_EGRESS | ✅ CODEF 인터넷 호출 가능 |
-| Cognito Google OAuth + Hosted UI 도메인 | ✅ `IdentityStack` IdP + Domain |
-| `codef-bank.client` URL-decode 버그 수정 | ✅ `decodeURIComponent` 적용 |
+| Cognito Google OAuth + Hosted UI 도메인 | ✅ `IdentityStack` IdP + Domain, redirect chain 302 검증됨 |
+| CODEF 응답 URL-decode 버그 수정 | ✅ `decodeURIComponent` 모든 클라이언트 적용 |
+| CODEF 성공 코드 비교 버그 수정 | ✅ `00000` → `CF-00000` |
+| SFN Map ItemSelector 패턴 정착 | ✅ `iterator` deprecated 제거 + `payload` 명시 매핑 |
+| Classify worker accounts 시드 | ✅ `K_IFRS_DEFAULT_ACCOUNTS` bulk-insert (FK 위반 방지) |
+| **Bedrock dev/prod 일원화** | ✅ 모든 Lambda에서 실 Sonnet 사용, stub은 unit test 전용 격리 |
+| **E2E 검증** | ✅ 16/16 시나리오 PASS, 신한 110xxxxxxxxx + Sonnet 4.6 분개 검증 완료 |
 
 ### 보안 트레이드오프 (Phase 0 한정)
 
@@ -59,12 +64,17 @@ Slice 5 범위: **journal-core**, **캐시 projector**, **마이그레이션(ai_
 
 ## 다음 슬라이스 (Slice 7+)
 
+Slice 6에서 CODEF 실어댑터 + 파이프라인 + SFN itemProcessor + ai_decisions 기록까지 완료. 남은 항목:
+
 | 항목 | 비고 |
 |------|------|
-| CODEF 실어댑터 (`apps/codef`) | mock fixture · Postgres · SQS 본문 연결 |
-| 파이프라인 고도화 | 워커 트랜잭션 분리·`ai_decisions`·Powertools 전 구간 |
+| CODEF 인증 방식 마이그레이션 | loginType=1(ID/PW) → loginType=0(인증서 팝업) 또는 loginType=5(간편인증). Phase 1 |
+| 운영 모니터링 강화 | Powertools 전 Lambda 적용, X-Ray + Application Signals SLO |
 | RDS Proxy (prod) | CODEF 폴링 동시성 증가 시점에 도입 |
-| SFN Map API | `iterator` → `itemProcessor` 마이그레이션 |
+| Bedrock 비용 컨트롤 | 일일 한도 + per-tenant token quota + cache 활용 |
+| Foundation Secret CMK 정합성 | CDK에서 `encryptionKey: alias/aws/secretsmanager` 명시로 drift 정리 |
+| Multi-bank 지원 | Toss/KakaoBank 등 organization 추가 + per-bank loginType 매핑 |
+| 프론트엔드 UI | Cognito Hosted UI 콜백 처리 + 분개 시각화 |
 
 ---
 
