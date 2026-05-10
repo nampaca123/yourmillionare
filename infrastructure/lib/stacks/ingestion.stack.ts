@@ -152,7 +152,6 @@ export class IngestionStack extends Stack {
       environment: {
         ...commonEnv,
         BEDROCK_MODEL_ID: BEDROCK_PROFILE_ID,
-        CLASSIFY_MODE: isProd ? 'bedrock' : 'stub',
         TRANSACTION_CACHE_TABLE_NAME: props.transactionCache.tableName,
       },
       bundling: commonBundling,

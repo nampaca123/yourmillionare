@@ -137,7 +137,6 @@ export class ApiStack extends Stack {
         COST_COUNTER_TABLE_NAME: props.cache.costCounter.tableName,
         IDEMPOTENCY_TABLE_NAME: props.cache.idempotencyKeys.tableName,
         TRANSACTION_CACHE_TABLE_NAME: props.cache.transactionCache.tableName,
-        JOURNAL_STUB_CLASSIFIER: props.deploymentEnv === 'dev' ? '1' : '0',
       },
       bundling: {
         externalModules: ['@aws-sdk/*', 'pg-native'],
