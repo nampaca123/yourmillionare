@@ -30,15 +30,16 @@ export class FoundationStack extends Stack {
       removalPolicy,
     });
 
+    // Encryption left to AWS-managed `aws/secretsmanager` key on purpose: keeps the secret
+    // grantable from downstream stacks (Api Lambda) without cross-stack KMS key-policy edges
+    // that produce dependency cycles between Foundation/Data/Api.
     this.codefCredentialSecret = new Secret(this, 'CodefCredentialSecret', {
-      description: 'CODEF API credentials and per-tenant Connected ID payloads. Inject value out-of-band.',
-      encryptionKey: this.sharedKey,
+      description: 'CODEF API credentials. Inject value out-of-band via scripts/sync-secrets-from-env.sh.',
       removalPolicy,
     });
 
     this.ecosCredentialSecret = new Secret(this, 'EcosCredentialSecret', {
       description: 'ECOS REST API credentials for FX rate ingestion. Inject value out-of-band.',
-      encryptionKey: this.sharedKey,
       removalPolicy,
     });
 

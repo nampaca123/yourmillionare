@@ -1,6 +1,6 @@
 // Use case: create a tenant and register the caller as owner in one operation.
 
-import type { Tenant } from '../domain/tenant.entity.js';
+import type { Tenant, BusinessType } from '../domain/tenant.entity.js';
 import { parseBizRegNo, bizRegNoRaw } from '../domain/biz-reg-no.value-object.js';
 import type { TenantRepository } from './ports/tenant.repository.port.js';
 import type { TenantMemberRepository } from './ports/tenant-member.repository.port.js';
@@ -12,7 +12,7 @@ export interface CreateTenantInput {
   cognitoSub: string;
   legalName: string;
   displayName: string;
-  bizRegNoRaw: string;
+  bizRegNoRaw?: string;
 }
 
 export interface CreateTenantOutput {
@@ -28,13 +28,21 @@ export class CreateTenantUseCase {
   ) {}
 
   async execute(input: CreateTenantInput): Promise<CreateTenantOutput> {
-    const brn = parseBizRegNo(input.bizRegNoRaw);
-    const rawDigits = bizRegNoRaw(brn);
+    let bizRegNoEncrypted: Buffer | null = null;
+    let bizRegNoHash: Buffer | null = null;
+    let businessType: BusinessType = 'personal';
 
-    const [encrypted, hash] = await Promise.all([
-      this.encryptor.encrypt(rawDigits),
-      this.hasher.hash(rawDigits),
-    ]);
+    if (input.bizRegNoRaw && input.bizRegNoRaw.length > 0) {
+      const brn = parseBizRegNo(input.bizRegNoRaw);
+      const rawDigits = bizRegNoRaw(brn);
+      const [encrypted, hash] = await Promise.all([
+        this.encryptor.encrypt(rawDigits),
+        this.hasher.hash(rawDigits),
+      ]);
+      bizRegNoEncrypted = encrypted;
+      bizRegNoHash = hash;
+      businessType = 'corporate';
+    }
 
     // Repository throws ConflictError on unique constraint violation for biz_reg_no_hash.
     const tenant = await this.tenants.create({
@@ -42,8 +50,9 @@ export class CreateTenantUseCase {
       cognitoSub: input.cognitoSub,
       legalName: input.legalName,
       displayName: input.displayName,
-      bizRegNoEncrypted: encrypted,
-      bizRegNoHash: hash,
+      businessType,
+      bizRegNoEncrypted,
+      bizRegNoHash,
     });
 
     await this.members.add({

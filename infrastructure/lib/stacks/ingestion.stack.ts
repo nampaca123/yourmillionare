@@ -3,7 +3,7 @@
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
-import { Duration, Stack } from 'aws-cdk-lib';
+import { CfnOutput, Duration, Stack } from 'aws-cdk-lib';
 import type { StackProps } from 'aws-cdk-lib';
 import { Alarm, ComparisonOperator, TreatMissingData } from 'aws-cdk-lib/aws-cloudwatch';
 import { SnsAction } from 'aws-cdk-lib/aws-cloudwatch-actions';
@@ -199,7 +199,7 @@ export class IngestionStack extends Stack {
     const fetchTenantTask = new tasks.LambdaInvoke(this, 'FetchTenantTask', {
       lambdaFunction: codefFetchFn,
       payload: sfn.TaskInput.fromObject({
-        tenantId: sfn.JsonPath.stringAt('$$.Map.Item.Value'),
+        tenantId: sfn.JsonPath.stringAt('$.tenantId'),
       }),
       payloadResponseOnly: true,
     });
@@ -207,6 +207,9 @@ export class IngestionStack extends Stack {
     const map = new sfn.Map(this, 'TenantFetchMap', {
       itemsPath: '$.listOut.tenantIds',
       maxConcurrency: 3,
+      itemSelector: {
+        tenantId: sfn.JsonPath.stringAt('$$.Map.Item.Value'),
+      },
     });
     map.itemProcessor(fetchTenantTask);
 
@@ -215,6 +218,12 @@ export class IngestionStack extends Stack {
     const stateMachine = new sfn.StateMachine(this, 'IngestionStateMachine', {
       definitionBody: sfn.DefinitionBody.fromChainable(definition),
       tracingEnabled: true,
+    });
+
+    new CfnOutput(this, 'IngestionStateMachineArn', {
+      value: stateMachine.stateMachineArn,
+      description: 'ARN of the CODEF ingestion Step Functions state machine. Used by run-codef-e2e.sh to trigger fetches.',
+      exportName: `${id}-IngestionStateMachineArn`,
     });
 
     const vpcLambdaSuppressions = [

@@ -2,7 +2,7 @@
 
 import type { BizRegNo } from './biz-reg-no.value-object.js';
 
-export type BusinessType = 'corporate' | 'sole_proprietor';
+export type BusinessType = 'corporate' | 'sole_proprietor' | 'personal';
 export type TaxType = 'general' | 'simplified' | 'tax_exempt';
 
 export interface Tenant {

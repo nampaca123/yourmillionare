@@ -11,16 +11,24 @@ import type { BizRegNo } from '../../src/domain/biz-reg-no.value-object.js';
 import { ConflictError } from '../../src/shared/errors/app-error.js';
 import type { InMemoryTenantMemberRepository } from './in-memory-tenant-member.repository.js';
 
+interface StoredTenant {
+  tenant: Tenant;
+  createdByUserId: string;
+}
+
 export class InMemoryTenantRepository implements TenantRepository {
-  private readonly store = new Map<string, Tenant>();
+  private readonly store = new Map<string, StoredTenant>();
   private readonly hashIndex = new Map<string, string>();
 
   constructor(private readonly memberRepo?: InMemoryTenantMemberRepository) {}
 
   async create(params: CreateTenantParams): Promise<Tenant> {
-    const hashKey = params.bizRegNoHash.toString('hex');
-    if (this.hashIndex.has(hashKey)) {
-      throw new ConflictError('A tenant with this business registration number already exists');
+    if (params.bizRegNoHash) {
+      const hashKey = params.bizRegNoHash.toString('hex');
+      if (this.hashIndex.has(hashKey)) {
+        throw new ConflictError('A tenant with this business registration number already exists');
+      }
+      this.hashIndex.set(hashKey, '');
     }
     const id = randomUUID();
     const tenant = createTenant({
@@ -28,11 +36,14 @@ export class InMemoryTenantRepository implements TenantRepository {
       bizRegNo: '' as BizRegNo,
       legalName: params.legalName,
       displayName: params.displayName,
+      businessType: params.businessType,
       foundedOn: undefined,
       regionCode: undefined,
     });
-    this.store.set(id, tenant);
-    this.hashIndex.set(hashKey, id);
+    this.store.set(id, { tenant, createdByUserId: params.userId });
+    if (params.bizRegNoHash) {
+      this.hashIndex.set(params.bizRegNoHash.toString('hex'), id);
+    }
     return tenant;
   }
 
@@ -42,11 +53,20 @@ export class InMemoryTenantRepository implements TenantRepository {
       .allFor(userId)
       .map((m) => m.tenantId);
     return memberTenantIds
-      .map((tid) => this.store.get(tid))
+      .map((tid) => this.store.get(tid)?.tenant)
       .filter((t): t is Tenant => t !== undefined);
   }
 
-  seed(tenant: Tenant): void {
-    this.store.set(tenant.id, tenant);
+  async findByCreatedByUserId(userId: string): Promise<Tenant | null> {
+    for (const entry of this.store.values()) {
+      if (entry.createdByUserId === userId && entry.tenant.businessType === 'personal') {
+        return entry.tenant;
+      }
+    }
+    return null;
+  }
+
+  seed(tenant: Tenant, createdByUserId = ''): void {
+    this.store.set(tenant.id, { tenant, createdByUserId });
   }
 }

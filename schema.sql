@@ -67,13 +67,13 @@ COMMENT ON TABLE user_profiles IS '표시명·알림·로케일. PIPA 삭제 요
 -- ============================================================
 --  3. tenants — 법인/개인사업자
 -- ============================================================
-CREATE TYPE business_type AS ENUM ('corporate', 'sole_proprietor');
+CREATE TYPE business_type AS ENUM ('corporate', 'sole_proprietor', 'personal');
 CREATE TYPE tax_type      AS ENUM ('general', 'simplified', 'tax_exempt');
 
 CREATE TABLE tenants (
   id                       UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
-  biz_reg_no_encrypted     BYTEA         NOT NULL,
-  biz_reg_no_hash          BYTEA         NOT NULL UNIQUE,
+  biz_reg_no_encrypted     BYTEA,
+  biz_reg_no_hash          BYTEA UNIQUE,
   legal_name               VARCHAR(200)  NOT NULL,
   display_name             VARCHAR(100)  NOT NULL,
   business_type            business_type NOT NULL DEFAULT 'corporate',
@@ -119,11 +119,22 @@ COMMENT ON TABLE tenant_members IS '공동대표 다수가 한 법인 데이터�
 CREATE TABLE tenant_bank_accounts (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id      UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-  organization   CHAR(4)     NOT NULL,
-  account_number VARCHAR(50) NOT NULL,
-  is_active      BOOLEAN     NOT NULL DEFAULT TRUE,
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  organization   CHAR(4)      NOT NULL,
+  account_number VARCHAR(50)  NOT NULL,
+  connected_id   VARCHAR(100),
+  is_active      BOOLEAN      NOT NULL DEFAULT TRUE,
+  created_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
   UNIQUE (tenant_id, organization, account_number)
+);
+
+CREATE TABLE tenant_bank_connections (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id     UUID         NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  organization  CHAR(4)      NOT NULL,
+  connected_id  VARCHAR(100) NOT NULL,
+  created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  UNIQUE (tenant_id, organization)
 );
 
 
@@ -357,6 +368,7 @@ GRANT EXECUTE ON FUNCTION app_uuid_from_setting(TEXT) TO app_user;
 ALTER TABLE tenants               ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenant_members        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenant_bank_accounts  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenant_bank_connections ENABLE ROW LEVEL SECURITY;
 ALTER TABLE accounts              ENABLE ROW LEVEL SECURITY;
 ALTER TABLE journal_entries  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE journal_lines    ENABLE ROW LEVEL SECURITY;
@@ -435,6 +447,15 @@ CREATE POLICY tenant_isolation ON tenant_bank_accounts
   WITH CHECK (tenant_id = app_uuid_from_setting('app.current_tenant_id'));
 
 CREATE POLICY system_select ON tenant_bank_accounts
+  FOR SELECT TO app_user
+  USING (current_setting('app.cognito_sub', true) = 'system');
+
+CREATE POLICY tenant_isolation ON tenant_bank_connections
+  FOR ALL TO app_user
+  USING      (tenant_id = app_uuid_from_setting('app.current_tenant_id'))
+  WITH CHECK (tenant_id = app_uuid_from_setting('app.current_tenant_id'));
+
+CREATE POLICY system_select ON tenant_bank_connections
   FOR SELECT TO app_user
   USING (current_setting('app.cognito_sub', true) = 'system');
 

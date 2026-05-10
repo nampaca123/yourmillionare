@@ -1,14 +1,17 @@
-// Identity stack: Cognito User Pool and App Client for Slice 3 authentication.
+// Identity stack: Cognito User Pool, Google IdP, App Client, and Hosted UI domain.
 
-import { CfnOutput, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { CfnOutput, RemovalPolicy, SecretValue, Stack } from 'aws-cdk-lib';
 import type { StackProps } from 'aws-cdk-lib';
 import {
   AccountRecovery,
   AdvancedSecurityMode,
   Mfa,
   OAuthScope,
+  ProviderAttribute,
   UserPool,
   UserPoolClient,
+  UserPoolClientIdentityProvider,
+  UserPoolIdentityProviderGoogle,
   VerificationEmailStyle,
 } from 'aws-cdk-lib/aws-cognito';
 import { NagSuppressions } from 'cdk-nag';
@@ -18,12 +21,18 @@ import type { DeploymentEnv } from '../config/env.config.js';
 
 export interface IdentityStackProps extends StackProps {
   readonly deploymentEnv: DeploymentEnv;
+  readonly googleClientId: string;
+  readonly googleClientSecret: string;
+  readonly cognitoDomainPrefix: string;
+  readonly callbackUrls?: string[];
+  readonly logoutUrls?: string[];
 }
 
 export class IdentityStack extends Stack {
   public readonly userPool: UserPool;
   public readonly userPoolClient: UserPoolClient;
   public readonly issuerUrl: string;
+  public readonly hostedUiDomainBaseUrl: string;
 
   constructor(scope: Construct, id: string, props: IdentityStackProps) {
     super(scope, id, props);
@@ -45,25 +54,57 @@ export class IdentityStack extends Stack {
         requireDigits: true,
         requireSymbols: true,
       },
-      // dev: MFA OFF for UX/cost; prod: OPTIONAL so users can opt in.
       mfa: isProd ? Mfa.OPTIONAL : Mfa.OFF,
-      // dev: Advanced Security OFF to avoid $0.05/MAU; prod: ENFORCED for fraud detection.
       advancedSecurityMode: isProd ? AdvancedSecurityMode.ENFORCED : AdvancedSecurityMode.OFF,
       accountRecovery: AccountRecovery.EMAIL_ONLY,
       removalPolicy: isProd ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY,
     });
 
+    const googleIdp = new UserPoolIdentityProviderGoogle(this, 'GoogleIdp', {
+      userPool: this.userPool,
+      clientId: props.googleClientId,
+      clientSecretValue: SecretValue.unsafePlainText(props.googleClientSecret),
+      scopes: ['openid', 'email', 'profile'],
+      attributeMapping: {
+        email: ProviderAttribute.GOOGLE_EMAIL,
+        givenName: ProviderAttribute.GOOGLE_GIVEN_NAME,
+        familyName: ProviderAttribute.GOOGLE_FAMILY_NAME,
+      },
+    });
+
+    const domain = this.userPool.addDomain('Domain', {
+      cognitoDomain: { domainPrefix: props.cognitoDomainPrefix },
+    });
+    this.hostedUiDomainBaseUrl = `https://${props.cognitoDomainPrefix}.auth.${region}.amazoncognito.com`;
+
+    const callbackUrls = props.callbackUrls && props.callbackUrls.length > 0
+      ? props.callbackUrls
+      : ['http://localhost:3000/callback'];
+    const logoutUrls = props.logoutUrls && props.logoutUrls.length > 0
+      ? props.logoutUrls
+      : ['http://localhost:3000/'];
+
     this.userPoolClient = new UserPoolClient(this, 'UserPoolClient', {
       userPool: this.userPool,
       generateSecret: false,
-      authFlows: { userSrp: true },
+      authFlows: { userSrp: true, adminUserPassword: true },
+      supportedIdentityProviders: [
+        UserPoolClientIdentityProvider.COGNITO,
+        UserPoolClientIdentityProvider.GOOGLE,
+      ],
       oAuth: {
+        flows: {
+          authorizationCodeGrant: true,
+        },
         scopes: [OAuthScope.EMAIL, OAuthScope.OPENID, OAuthScope.PROFILE],
+        callbackUrls,
+        logoutUrls,
       },
-      // ID Token and Access Token TTL: 1 hour
       idTokenValidity: undefined,
       accessTokenValidity: undefined,
     });
+    this.userPoolClient.node.addDependency(googleIdp);
+    this.userPoolClient.node.addDependency(domain);
 
     this.issuerUrl = `https://cognito-idp.${region}.amazonaws.com/${this.userPool.userPoolId}`;
 
@@ -78,6 +119,14 @@ export class IdentityStack extends Stack {
     new CfnOutput(this, 'IssuerUrl', {
       value: this.issuerUrl,
       exportName: `${id}-IssuerUrl`,
+    });
+    new CfnOutput(this, 'HostedUiDomainBaseUrl', {
+      value: this.hostedUiDomainBaseUrl,
+      exportName: `${id}-HostedUiDomainBaseUrl`,
+    });
+    new CfnOutput(this, 'GoogleRedirectUri', {
+      value: `${this.hostedUiDomainBaseUrl}/oauth2/idpresponse`,
+      description: 'Add this URI to GCP OAuth Client Authorized redirect URIs',
     });
 
     // --- cdk-nag suppressions ---

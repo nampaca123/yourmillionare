@@ -7,6 +7,7 @@ import {
   DdbCacheProjectorAdapter,
   PgJournalRepository,
   createJournalEntry,
+  K_IFRS_DEFAULT_ACCOUNTS,
 } from '@ym/journal-core';
 import type { TransactionClassifier } from '@ym/journal-core';
 import { getPool } from '../../outbound/pg/pg-pool.client.js';
@@ -55,6 +56,22 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
         await client.query('RESET app.current_tenant_id');
         await client.query("SELECT set_config('app.cognito_sub', 'system', true)");
         await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+
+        const seedValues = K_IFRS_DEFAULT_ACCOUNTS
+          .map((_, i) => {
+            const b = i * 6;
+            return `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}, $${b + 6})`;
+          })
+          .join(', ');
+        const seedParams = K_IFRS_DEFAULT_ACCOUNTS.flatMap((a) => [
+          tenantId, a.code, a.name, a.displayName, a.type, a.normalBalance,
+        ]);
+        await client.query(
+          `INSERT INTO accounts (tenant_id, code, name, display_name, type, normal_balance)
+           VALUES ${seedValues}
+           ON CONFLICT (tenant_id, code) DO NOTHING`,
+          seedParams,
+        );
 
         const raw = await findById(client, rawTransactionId);
         if (!raw) {

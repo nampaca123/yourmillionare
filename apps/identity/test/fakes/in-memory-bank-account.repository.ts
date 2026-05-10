@@ -13,6 +13,7 @@ export class InMemoryBankAccountRepository implements BankAccountRepository {
     cognitoSub: string;
     organization: string;
     accountNumber: string;
+    connectedId: string;
   }): Promise<BankAccount> {
     const duplicate = this.store.some(
       (a) =>
@@ -27,6 +28,7 @@ export class InMemoryBankAccountRepository implements BankAccountRepository {
       tenantId: params.tenantId,
       organization: params.organization,
       accountNumber: params.accountNumber,
+      connectedId: params.connectedId,
       isActive: true,
       createdAt: new Date(),
     };

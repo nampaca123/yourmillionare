@@ -9,7 +9,7 @@ export type {
   TransactionClassifier,
 } from './application/ports/transaction-classifier.port.js';
 export type { CacheProjector } from './application/ports/cache-projector.port.js';
-export type { JournalRepository } from './application/ports/journal.repository.port.js';
+export type { JournalRepository, JournalEntrySummary } from './application/ports/journal.repository.port.js';
 
 export { BedrockConverseClassifier } from './infrastructure/bedrock/bedrock-converse.classifier.js';
 export { DeterministicStubClassifier } from './infrastructure/stub/deterministic-stub.classifier.js';

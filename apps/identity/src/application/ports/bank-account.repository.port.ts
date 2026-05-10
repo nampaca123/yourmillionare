@@ -5,6 +5,7 @@ export interface BankAccount {
   tenantId: string;
   organization: string;
   accountNumber: string;
+  connectedId: string;
   isActive: boolean;
   createdAt: Date;
 }
@@ -16,5 +17,6 @@ export interface BankAccountRepository {
     cognitoSub: string;
     organization: string;
     accountNumber: string;
+    connectedId: string;
   }): Promise<BankAccount>;
 }

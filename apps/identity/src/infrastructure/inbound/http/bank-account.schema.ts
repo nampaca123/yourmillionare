@@ -1,4 +1,4 @@
-// Schema: Zod validation for bank account registration request body.
+// Schema: Zod validation for bank account confirmation request body.
 
 import { z } from 'zod';
 

@@ -1,7 +1,6 @@
 // Lambda entry point: fetches CODEF bank transactions per tenant and queues them for classification.
 
 import { withRlsContext } from '../../outbound/pg/pg-rls.context.js';
-import { getCodefSecret } from '../../outbound/codef/codef-auth.client.js';
 import { fetchTransactions } from '../../outbound/codef/codef-bank.client.js';
 import { upsertBatch, markDispatched, findLatestFetchedAt } from '../../outbound/pg/pg-raw-transaction.repository.js';
 import { sendTaskBatch } from '../../outbound/sqs/classify-dispatcher.client.js';
@@ -23,6 +22,7 @@ interface FetchResult {
 interface BankAccountRow {
   organization: string;
   account_number: string;
+  connected_id: string | null;
 }
 
 const toDateStr = (date: Date): string => {
@@ -36,28 +36,19 @@ export const handler = async (event: FetchPayload): Promise<FetchResult> => {
   const { tenantId } = event;
   const log = logger.child({ fn: 'codef-fetch', tenantId });
 
-  const [codefSecret, accounts] = await Promise.all([
-    getCodefSecret(),
-    withRlsContext({ cognitoSub: 'system', tenantId }, async (client) => {
-      const result = await client.query<BankAccountRow>(
-        `SELECT organization, account_number
-         FROM tenant_bank_accounts
-         WHERE tenant_id = $1 AND is_active = TRUE`,
-        [tenantId],
-      );
-      return result.rows;
-    }),
-  ]);
+  const accounts = await withRlsContext({ cognitoSub: 'system', tenantId }, async (client) => {
+    const result = await client.query<BankAccountRow>(
+      `SELECT organization, account_number, connected_id
+       FROM tenant_bank_accounts
+       WHERE tenant_id = $1 AND is_active = TRUE`,
+      [tenantId],
+    );
+    return result.rows;
+  });
 
   if (accounts.length === 0) {
     log.info('No active bank accounts for tenant');
     return { tenantId, fetched: 0, queued: 0 };
-  }
-
-  const connectedId = codefSecret.connectedIds[tenantId];
-  if (!connectedId) {
-    log.error({ tenantId }, 'connectedId not found in CODEF secret for tenant');
-    throw new Error(`connectedId missing for tenant ${tenantId}`);
   }
 
   const endDate = toDateStr(new Date());
@@ -65,6 +56,14 @@ export const handler = async (event: FetchPayload): Promise<FetchResult> => {
   const allNewIds: string[] = [];
 
   for (const account of accounts) {
+    if (!account.connected_id) {
+      log.warn(
+        { organization: account.organization, accountNumber: account.account_number },
+        'connected_id missing for bank account; skipping',
+      );
+      continue;
+    }
+
     const latestFetchedAt = await withRlsContext({ cognitoSub: 'system', tenantId }, (client) =>
       findLatestFetchedAt(client, tenantId, SOURCE),
     );
@@ -78,7 +77,7 @@ export const handler = async (event: FetchPayload): Promise<FetchResult> => {
     log.info({ organization: account.organization, startDate, endDate }, 'Fetching CODEF transactions');
 
     const transactions = await fetchTransactions({
-      connectedId,
+      connectedId: account.connected_id,
       organization: account.organization,
       accountNumber: account.account_number,
       startDate,

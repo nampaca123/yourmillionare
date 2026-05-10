@@ -4,7 +4,6 @@ export interface CodefSecret {
   clientId: string;
   clientSecret: string;
   publicKey: string;
-  connectedIds: Record<string, string>;
 }
 
 export interface CodefTokenResponse {
