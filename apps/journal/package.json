@@ -10,10 +10,12 @@
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1041.0",
     "@aws-sdk/client-dynamodb": "^3.1041.0",
+    "@aws-sdk/client-sfn": "^3.1041.0",
     "@aws-sdk/lib-dynamodb": "^3.1041.0",
     "@aws-sdk/rds-signer": "^3.1041.0",
     "@aws-lambda-powertools/idempotency": "^2.14.0",
     "@ym/journal-core": "*",
+    "@ym/reports-core": "*",
     "@ym/shared-errors": "*",
     "pg": "^8.20.0",
     "pino": "^9.0.0",

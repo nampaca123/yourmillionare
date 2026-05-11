@@ -25,7 +25,7 @@ const DATABASE = process.env.DATABASE_NAME ?? 'yourmillionare';
 const REGION = process.env.APP_REGION ?? process.env.AWS_REGION ?? 'ap-northeast-2';
 const PHYSICAL_ID = 'verifier-schema';
 
-const EXPECTED_TABLE_COUNT = 13;
+const EXPECTED_TABLE_COUNT = 28;
 
 // Exact whitelist of (tablename:policyname) pairs that must exist after all migrations.
 // Removing or renaming any policy causes deployment to fail — intentional regression gate.
@@ -52,6 +52,26 @@ const EXPECTED_POLICIES: ReadonlySet<string> = new Set([
   'tenant_bank_accounts:system_select',
   'tenant_bank_connections:tenant_isolation',
   'tenant_bank_connections:system_select',
+  'journal_entry_draft:tenant_isolation',
+  'tax_rule:tax_rule_global_select',
+  'tax_rule:tax_rule_admin_write',
+  'tax_rule_approval:tax_rule_approval_admin_only',
+  'tax_rule_change_log:tax_rule_change_log_admin_select',
+  'tax_rule_review_request:tax_rule_review_request_admin_only',
+  'tax_law_sync_state:tax_law_sync_global_select',
+  'tax_law_sync_state:tax_law_sync_admin_write',
+  'tax_law_chunk_meta:tax_chunk_global_select',
+  'tax_law_chunk_meta:tax_chunk_admin_write',
+  'holiday_cache:holiday_global_select',
+  'holiday_cache:holiday_admin_write',
+  'filing_obligation:tenant_isolation',
+  'filing_applied_rule:filing_applied_rule_isolation',
+  'filing_cited_chunk:filing_cited_chunk_isolation',
+  'withholding_payment:tenant_isolation',
+  'tax_invoice:tenant_isolation',
+  'penalty_calculation:tenant_isolation',
+  'notification_event:tenant_isolation',
+  'notification_event:notification_system_read',
 ]);
 
 export const handler = async (event: CfnEvent): Promise<{ PhysicalResourceId: string }> => {

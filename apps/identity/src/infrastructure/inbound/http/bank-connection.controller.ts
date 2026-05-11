@@ -33,7 +33,7 @@ export const buildConnectBankController =
       organization: parsed.data.organization,
       loginId: parsed.data.loginId,
       loginPassword: parsed.data.loginPassword,
-      birthDate: parsed.data.birthDate,
+      ...(parsed.data.birthDate !== undefined ? { birthDate: parsed.data.birthDate } : {}),
     });
 
     return {

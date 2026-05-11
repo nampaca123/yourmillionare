@@ -80,22 +80,6 @@ const identity = new IdentityStack(app, `${config.stackPrefix}-Identity`, {
 });
 identity.addDependency(foundation);
 
-const api = new ApiStack(app, `${config.stackPrefix}-Api`, {
-  env,
-  deploymentEnv: config.env,
-  vpc: network.vpc,
-  lambdaSg: network.lambdaSg,
-  aurora: data.aurora,
-  cache: data.cache,
-  identity,
-  sharedKey: foundation.sharedKey,
-  codefSecret: foundation.codefCredentialSecret,
-});
-api.addDependency(network);
-api.addDependency(data);
-api.addDependency(identity);
-api.addDependency(foundation);
-
 const ingestion = new IngestionStack(app, `${config.stackPrefix}-Ingestion`, {
   env,
   deploymentEnv: config.env,
@@ -108,6 +92,25 @@ const ingestion = new IngestionStack(app, `${config.stackPrefix}-Ingestion`, {
 ingestion.addDependency(network);
 ingestion.addDependency(data);
 ingestion.addDependency(foundation);
+
+const api = new ApiStack(app, `${config.stackPrefix}-Api`, {
+  env,
+  deploymentEnv: config.env,
+  vpc: network.vpc,
+  lambdaSg: network.lambdaSg,
+  aurora: data.aurora,
+  cache: data.cache,
+  identity,
+  sharedKey: foundation.sharedKey,
+  codefSecret: foundation.codefCredentialSecret,
+  manualSyncStateMachineArn: ingestion.manualSyncStateMachineArn,
+  legalSyncStateMachineArn: ingestion.legalSyncStateMachineArn,
+});
+api.addDependency(network);
+api.addDependency(data);
+api.addDependency(identity);
+api.addDependency(foundation);
+api.addDependency(ingestion);
 
 Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));
 

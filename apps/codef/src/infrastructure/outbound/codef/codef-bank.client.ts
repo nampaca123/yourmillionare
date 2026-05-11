@@ -88,7 +88,7 @@ export const fetchTransactions = async (params: {
       externalId,
       occurredAt: toDate(date, time),
       amount,
-      counterparty,
+      ...(counterparty !== undefined ? { counterparty } : {}),
       rawPayload: row,
     };
   });

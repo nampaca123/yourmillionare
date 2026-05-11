@@ -22,7 +22,7 @@ export class CodefAccountAdapter implements CodefAccountPort {
       organization: params.organization,
       loginId: params.loginId,
       encryptedPassword,
-      birthDate: params.birthDate,
+      ...(params.birthDate !== undefined ? { birthDate: params.birthDate } : {}),
     });
 
     const accounts = await listShinhanAccounts(token, connectedId, params.organization);
