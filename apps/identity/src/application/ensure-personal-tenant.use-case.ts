@@ -2,6 +2,7 @@
 
 import type { Tenant } from '../domain/tenant.entity.js';
 import type { User } from '../domain/user.entity.js';
+import type { ObligationSeedDispatcher } from './ports/obligation-seed-dispatcher.port.js';
 import type { TenantRepository } from './ports/tenant.repository.port.js';
 import type { TenantMemberRepository } from './ports/tenant-member.repository.port.js';
 
@@ -9,6 +10,7 @@ export class EnsurePersonalTenantUseCase {
   constructor(
     private readonly tenants: TenantRepository,
     private readonly members: TenantMemberRepository,
+    private readonly seedDispatcher: ObligationSeedDispatcher | null = null,
   ) {}
 
   async execute(user: User): Promise<Tenant> {
@@ -31,6 +33,10 @@ export class EnsurePersonalTenantUseCase {
       role: 'owner',
       cognitoSub: user.cognitoSub,
     });
+
+    if (this.seedDispatcher) {
+      await this.seedDispatcher.seed({ tenantId: tenant.id });
+    }
 
     return tenant;
   }

@@ -6,6 +6,10 @@ import { getPool } from '../../outbound/pg/pg-pool.client.js';
 import { withRlsContext } from '../../outbound/pg/pg-rls.context.js';
 import { logger } from '../../../shared/logging/logger.js';
 
+interface ManualInvokePayload {
+  tenantId?: string;
+}
+
 const HORIZON_MONTHS = 12;
 const VAT_PRELIM_DUE_DAY = 25;
 const VAT_FINAL_DUE_DAY = 25;
@@ -15,7 +19,7 @@ const CORP_FINAL_DUE_MONTHS_AFTER_YE = 3;
 
 interface TenantRow {
   id: string;
-  business_type: string;
+  business_type: 'corporate' | 'sole_proprietor' | 'personal';
   fiscal_year_start_month: number;
   withholding_cadence: 'MONTHLY' | 'SEMIANNUAL';
   vat_prepayment_recipient: boolean;
@@ -134,6 +138,28 @@ const buildWithholdingObligations = (
   return out;
 };
 
+const buildComprehensiveIncomeObligations = (
+  fromYear: number,
+  calendar: HolidayCalendar,
+): ReadonlyArray<Obligation> => {
+  // 종합소득세: 매년 5월 1일~31일 신고 (전년 1.1~12.31 귀속). 1년치 + 다음년치 모두 생성.
+  const out: Obligation[] = [];
+  for (let yearOffset = -1; yearOffset <= 1; yearOffset += 1) {
+    const incomeYear = fromYear + yearOffset;
+    const periodStart = iso(incomeYear, 1, 1);
+    const periodEnd = iso(incomeYear, 12, 31);
+    const statutoryDue = iso(incomeYear + 1, 5, 31);
+    out.push({
+      kind: 'COMPREHENSIVE_INCOME',
+      periodStart,
+      periodEnd,
+      statutoryDueDate: statutoryDue,
+      businessDueDate: rollForwardToBusinessDay(statutoryDue, calendar),
+    });
+  }
+  return out;
+};
+
 const buildCorpFinalObligation = (
   fromYear: number,
   fiscalYearStartMonth: number,
@@ -179,36 +205,66 @@ const insertObligations = async (
   });
 };
 
-const listCorporationTenants = async (): Promise<ReadonlyArray<TenantRow>> => {
-  return withRlsContext({ isTaxAdmin: true }, async (client) => {
-    const result = await client.query<TenantRow>(
-      `SELECT id, business_type, fiscal_year_start_month, withholding_cadence,
-              vat_prepayment_recipient, tax_type
-         FROM tenants
-        WHERE business_type IN ('corporate', 'sole_proprietor')`,
-    );
+const listAllTenants = async (tenantId?: string): Promise<ReadonlyArray<TenantRow>> => {
+  // For tenant-scoped invocations, set app.current_tenant_id so RLS allows the SELECT.
+  // For full-pool scan (cron), isTaxAdmin bypasses tenant_isolation policy.
+  const rlsCtx = tenantId
+    ? { tenantId, isTaxAdmin: true, cognitoSub: 'system' }
+    : { isTaxAdmin: true, cognitoSub: 'system' };
+  return withRlsContext(rlsCtx, async (client) => {
+    const sql = tenantId
+      ? `SELECT id, business_type::text AS business_type, fiscal_year_start_month, withholding_cadence,
+                vat_prepayment_recipient, tax_type::text AS tax_type
+           FROM tenants WHERE id = $1`
+      : `SELECT id, business_type::text AS business_type, fiscal_year_start_month, withholding_cadence,
+                vat_prepayment_recipient, tax_type::text AS tax_type
+           FROM tenants
+          WHERE business_type IN ('corporate', 'sole_proprietor', 'personal')`;
+    const result = tenantId
+      ? await client.query<TenantRow>(sql, [tenantId])
+      : await client.query<TenantRow>(sql);
     return result.rows;
   });
 };
 
-export const handler = async (_event: ScheduledEvent): Promise<{ tenantsProcessed: number; obligationsInserted: number }> => {
+const obligationsForTenant = (
+  t: TenantRow,
+  fromYear: number,
+  fromMonth: number,
+  calendar: HolidayCalendar,
+): ReadonlyArray<Obligation> => {
+  if (t.business_type === 'personal') {
+    return buildComprehensiveIncomeObligations(fromYear, calendar);
+  }
+  const vat = buildVatObligations(fromYear, fromMonth, t.tax_type, t.vat_prepayment_recipient, calendar);
+  const wh = buildWithholdingObligations(fromYear, fromMonth, t.withholding_cadence, calendar);
+  const corp = t.business_type === 'corporate'
+    ? buildCorpFinalObligation(fromYear, t.fiscal_year_start_month, calendar)
+    : [];
+  return [...vat, ...wh, ...corp];
+};
+
+export const handler = async (
+  event: ScheduledEvent | ManualInvokePayload,
+): Promise<{ tenantsProcessed: number; obligationsInserted: number }> => {
   const now = new Date();
   const fromYear = now.getUTCFullYear();
   const fromMonth = now.getUTCMonth() + 1;
-  const calendar = await loadHolidayCalendar([fromYear, fromYear + 1]);
+  const calendar = await loadHolidayCalendar([fromYear - 1, fromYear, fromYear + 1]);
 
-  const tenants = await listCorporationTenants();
+  const targetTenantId = (event as ManualInvokePayload).tenantId;
+  const tenants = await listAllTenants(targetTenantId);
   let totalInserted = 0;
 
   for (const t of tenants) {
-    const vat = buildVatObligations(fromYear, fromMonth, t.tax_type, t.vat_prepayment_recipient, calendar);
-    const wh = buildWithholdingObligations(fromYear, fromMonth, t.withholding_cadence, calendar);
-    const corp = buildCorpFinalObligation(fromYear, t.fiscal_year_start_month, calendar);
-    const obligations = [...vat, ...wh, ...corp];
+    const obligations = obligationsForTenant(t, fromYear, fromMonth, calendar);
     const inserted = await insertObligations(t.id, obligations);
     totalInserted += inserted;
     if (inserted > 0) {
-      logger.info({ tenantId: t.id, inserted, total: obligations.length }, 'Inserted filing obligations');
+      logger.info(
+        { tenantId: t.id, businessType: t.business_type, inserted, total: obligations.length },
+        'Inserted filing obligations',
+      );
     }
   }
 

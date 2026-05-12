@@ -37,6 +37,8 @@ export interface ApiStackProps extends StackProps {
   readonly manualSyncStateMachineArn?: string;
   readonly legalSyncStateMachineArn?: string;
   readonly legalKbId?: string;
+  readonly filingGeneratorFnArn?: string;
+  readonly filingGeneratorFnName?: string;
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -102,12 +104,22 @@ export class ApiStack extends Stack {
         KMS_BIZREG_HMAC_KEY_ARN: bizRegHmacKey.keyArn,
         IDEMPOTENCY_TABLE_NAME: props.cache.idempotencyKeys.tableName,
         CODEF_SECRET_ARN: props.codefSecret.secretArn,
+        FILING_GENERATOR_FN_NAME: props.filingGeneratorFnName ?? '',
       },
       bundling: {
         externalModules: ['@aws-sdk/*', 'pg-native'],
         nodeModules: ['pg', '@aws-lambda-powertools/idempotency'],
       },
     });
+
+    if (props.filingGeneratorFnArn) {
+      identityFn.addToRolePolicy(
+        new PolicyStatement({
+          actions: ['lambda:InvokeFunction'],
+          resources: [props.filingGeneratorFnArn],
+        }),
+      );
+    }
 
     // rds-db:connect scoped to app_user
     identityFn.addToRolePolicy(
@@ -278,6 +290,7 @@ export class ApiStack extends Stack {
         BEDROCK_RERANK_MODEL: rerankModelForStrategy,
         BEDROCK_EMBED_MODEL: embedModelForStrategy,
         BEDROCK_MODEL_ID: BEDROCK_PROFILE_ID,
+        AWS_ACCOUNT_ID: account,
       },
       bundling: {
         externalModules: ['@aws-sdk/*', 'pg-native'],
@@ -292,7 +305,15 @@ export class ApiStack extends Stack {
     );
     taxStrategyFn.addToRolePolicy(
       new PolicyStatement({
-        actions: ['bedrock:InvokeModel', 'bedrock:Converse', 'bedrock:Retrieve', 'bedrock:RetrieveAndGenerate', 'bedrock:Rerank'],
+        actions: [
+          'bedrock:InvokeModel',
+          'bedrock:Converse',
+          'bedrock:ConverseStream',
+          'bedrock:Retrieve',
+          'bedrock:RetrieveAndGenerate',
+          'bedrock:Rerank',
+          'bedrock:GetInferenceProfile',
+        ],
         resources: ['*'],
       }),
     );

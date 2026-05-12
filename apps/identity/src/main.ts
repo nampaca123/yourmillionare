@@ -15,6 +15,7 @@ import { PgBankConnectionRepository } from './infrastructure/outbound/pg/pg-bank
 import { KmsBizRegNoEncryptor } from './infrastructure/outbound/kms/kms-biz-reg-no.encryptor.js';
 import { KmsBizRegNoHasher } from './infrastructure/outbound/kms/kms-biz-reg-no.hasher.js';
 import { CodefAccountAdapter } from './infrastructure/outbound/codef/codef-account.adapter.js';
+import { LambdaFilingGeneratorDispatcher } from './infrastructure/outbound/lambda/filing-generator-dispatcher.adapter.js';
 import { EnsureUserExistsUseCase } from './application/ensure-user-exists.use-case.js';
 import { EnsurePersonalTenantUseCase } from './application/ensure-personal-tenant.use-case.js';
 import { CreateTenantUseCase } from './application/create-tenant.use-case.js';
@@ -47,7 +48,8 @@ const encryptor = new KmsBizRegNoEncryptor(kmsBizRegKeyArn);
 const hasher = new KmsBizRegNoHasher(kmsHmacKeyArn);
 
 const ensureUser = new EnsureUserExistsUseCase(userRepo);
-const ensurePersonalTenant = new EnsurePersonalTenantUseCase(tenantRepo, memberRepo);
+const seedDispatcher = new LambdaFilingGeneratorDispatcher();
+const ensurePersonalTenant = new EnsurePersonalTenantUseCase(tenantRepo, memberRepo, seedDispatcher);
 const createTenant = new CreateTenantUseCase(tenantRepo, memberRepo, encryptor, hasher);
 const listTenants = new ListMyTenantsUseCase(tenantRepo);
 const addBankAccount = new AddBankAccountUseCase(memberRepo, bankAccountRepo, bankConnectionRepo);

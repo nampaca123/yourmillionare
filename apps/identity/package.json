@@ -11,6 +11,7 @@
     "@aws-lambda-powertools/idempotency": "^2.14.0",
     "@aws-sdk/client-dynamodb": "^3.1041.0",
     "@aws-sdk/client-kms": "^3.1041.0",
+    "@aws-sdk/client-lambda": "^3.1041.0",
     "@aws-sdk/lib-dynamodb": "^3.1041.0",
     "@aws-sdk/rds-signer": "^3.1041.0",
     "@ym/shared-auth": "*",

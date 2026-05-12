@@ -56,6 +56,7 @@ export class IngestionStack extends Stack {
   public readonly legalSyncStateMachineArn: string;
   public readonly legalKbId: string;
   public readonly legalKbDataSourceId: string;
+  public readonly filingGeneratorFn: NodejsFunction;
 
   constructor(scope: Construct, id: string, props: IngestionStackProps) {
     super(scope, id, props);
@@ -238,6 +239,7 @@ export class IngestionStack extends Stack {
       bundling: commonBundling,
     });
     filingGeneratorFn.addToRolePolicy(rdsConnectPolicy);
+    this.filingGeneratorFn = filingGeneratorFn;
 
     // --- Monthly OPEN_LAW corpus sync — fetches latest revisions + uploads raw to LegalKbBucket ---
     const lawSyncFn = new NodejsFunction(this, 'MonthlyLawSyncFn', {
