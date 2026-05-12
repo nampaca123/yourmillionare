@@ -11,10 +11,12 @@
     "@aws-sdk/client-sfn": "^3.1041.0",
     "@aws-sdk/rds-signer": "^3.1041.0",
     "@aws-lambda-powertools/idempotency": "^2.0.0",
+    "@ym/agent-core": "*",
     "@ym/journal-core": "*",
     "@ym/shared-auth": "*",
     "@ym/shared-errors": "*",
     "@ym/tax-core": "*",
+    "@ym/tax-domain": "*",
     "pg": "^8.20.0",
     "pino": "^9.0.0",
     "zod": "^3.23.8"

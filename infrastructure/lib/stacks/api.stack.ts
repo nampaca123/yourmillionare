@@ -13,7 +13,7 @@ import { SubnetType } from 'aws-cdk-lib/aws-ec2';
 import type { IKey } from 'aws-cdk-lib/aws-kms';
 import { Key, KeySpec, KeyUsage } from 'aws-cdk-lib/aws-kms';
 import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
-import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
+import { Architecture, FunctionUrlAuthType, HttpMethod as LambdaHttpMethod, InvokeMode, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
 import type { ISecret } from 'aws-cdk-lib/aws-secretsmanager';
@@ -44,6 +44,7 @@ const IDENTITY_LAMBDA_ENTRY = join(__dirname, '../../../apps/identity/src/infras
 const JOURNAL_LAMBDA_ENTRY = join(__dirname, '../../../apps/journal/src/infrastructure/inbound/http/journal.lambda.ts');
 const FX_LAMBDA_ENTRY = join(__dirname, '../../../apps/fx/src/infrastructure/inbound/http/fx.lambda.ts');
 const TAX_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax/src/infrastructure/inbound/http/tax.lambda.ts');
+const TAX_STRATEGY_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax/src/infrastructure/inbound/streaming/tax-strategy.lambda.ts');
 const TAX_KNOWLEDGE_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax-knowledge/src/infrastructure/inbound/http/tax-knowledge.lambda.ts');
 const BEDROCK_PROFILE_ID = 'global.anthropic.claude-sonnet-4-6';
 const RERANK_REGION_DEFAULT = 'ap-northeast-1';
@@ -243,6 +244,74 @@ export class ApiStack extends Stack {
       }),
     );
 
+    const corsAllowedOrigins = (process.env.API_CORS_ALLOWED_ORIGINS ?? 'http://localhost:3000,http://localhost:5173')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    // --- Tax-Strategy SSE Lambda (Function URL with response streaming, Bedrock Converse + KB tools) ---
+    const kbRegionForStrategy = process.env.BEDROCK_KB_REGION ?? region;
+    const rerankRegionForStrategy = process.env.BEDROCK_RERANK_REGION ?? RERANK_REGION_DEFAULT;
+    const rerankModelForStrategy = process.env.BEDROCK_RERANK_MODEL ?? RERANK_MODEL_DEFAULT;
+    const embedModelForStrategy = process.env.BEDROCK_EMBED_MODEL ?? EMBED_MODEL_DEFAULT;
+    const taxStrategyFn = new NodejsFunction(this, 'TaxStrategyFn', {
+      entry: TAX_STRATEGY_LAMBDA_ENTRY,
+      handler: 'handler',
+      runtime: Runtime.NODEJS_20_X,
+      architecture: Architecture.ARM_64,
+      memorySize: 512,
+      timeout: Duration.minutes(3),
+      vpc: props.vpc,
+      vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [props.lambdaSg],
+      environment: {
+        CLUSTER_ENDPOINT: props.aurora.cluster.clusterEndpoint.hostname,
+        CLUSTER_PORT: '5432',
+        DATABASE_NAME: 'yourmillionare',
+        APP_REGION: region,
+        LOG_LEVEL: isProd ? 'info' : 'debug',
+        COGNITO_USER_POOL_ID: props.identity.userPool.userPoolId,
+        COGNITO_USER_POOL_CLIENT_ID: props.identity.userPoolClient.userPoolClientId,
+        BEDROCK_KB_ID: props.legalKbId ?? process.env.BEDROCK_KB_ID ?? '',
+        BEDROCK_KB_REGION: kbRegionForStrategy,
+        BEDROCK_RERANK_REGION: rerankRegionForStrategy,
+        BEDROCK_RERANK_MODEL: rerankModelForStrategy,
+        BEDROCK_EMBED_MODEL: embedModelForStrategy,
+        BEDROCK_MODEL_ID: BEDROCK_PROFILE_ID,
+      },
+      bundling: {
+        externalModules: ['@aws-sdk/*', 'pg-native'],
+        nodeModules: ['pg'],
+      },
+    });
+    taxStrategyFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['rds-db:connect'],
+        resources: [`arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`],
+      }),
+    );
+    taxStrategyFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['bedrock:InvokeModel', 'bedrock:Converse', 'bedrock:Retrieve', 'bedrock:RetrieveAndGenerate', 'bedrock:Rerank'],
+        resources: ['*'],
+      }),
+    );
+    const taxStrategyFnUrl = taxStrategyFn.addFunctionUrl({
+      authType: FunctionUrlAuthType.NONE,
+      invokeMode: InvokeMode.RESPONSE_STREAM,
+      cors: {
+        allowedOrigins: corsAllowedOrigins,
+        allowedMethods: [LambdaHttpMethod.POST],
+        allowedHeaders: ['authorization', 'content-type', 'idempotency-key'],
+        maxAge: Duration.hours(1),
+      },
+    });
+    new CfnOutput(this, 'TaxStrategyFnUrl', {
+      value: taxStrategyFnUrl.url,
+      description: 'Function URL for tax/strategy SSE endpoint (Bearer JWT in Authorization header).',
+      exportName: `${id}-TaxStrategyFnUrl`,
+    });
+
     // --- Tax-Knowledge Lambda (Bedrock KB + AgentCore-style tools + admin) ---
     const kbRegion = process.env.BEDROCK_KB_REGION ?? region;
     const rerankRegion = process.env.BEDROCK_RERANK_REGION ?? RERANK_REGION_DEFAULT;
@@ -314,11 +383,6 @@ export class ApiStack extends Stack {
       // audience = UserPoolClientId → only ID Tokens (aud=clientId) pass; Access Tokens have no aud.
       jwtAudience: [props.identity.userPoolClient.userPoolClientId],
     });
-
-    const corsAllowedOrigins = (process.env.API_CORS_ALLOWED_ORIGINS ?? 'http://localhost:3000,http://localhost:5173')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
 
     this.httpApi = new HttpApi(this, 'HttpApi', {
       createDefaultStage: true,
@@ -553,7 +617,7 @@ export class ApiStack extends Stack {
       true,
     );
 
-    for (const fn of [fxFn, taxFn, taxKnowledgeFn]) {
+    for (const fn of [fxFn, taxFn, taxKnowledgeFn, taxStrategyFn]) {
       NagSuppressions.addResourceSuppressions(
         fn,
         [
