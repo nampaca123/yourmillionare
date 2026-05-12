@@ -228,7 +228,7 @@ export const handler = async (event: FetchPayload): Promise<FetchResult> => {
     );
   }
 
-  let results: AccountResult[] = [];
+  const results: AccountResult[] = [];
 
   try {
     const accounts = await withRlsContext({ cognitoSub: 'system', tenantId }, async (client) => {
