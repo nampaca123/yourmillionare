@@ -92,16 +92,14 @@ export class PgViewsRepository implements ViewsRepository {
            JOIN accounts a ON a.tenant_id = je.tenant_id AND a.code = jl.account_code
            WHERE je.tenant_id = $1 AND je.entry_date BETWEEN $2 AND $3
          ),
-         trailing_period AS (
-           SELECT je.entry_date,
-                  SUM(CASE WHEN a.type = 'revenue' THEN jl.credit - jl.debit ELSE 0 END) AS net_revenue
+         trailing_total AS (
+           SELECT COALESCE(SUM(jl.credit - jl.debit), 0) AS net_revenue_3mo
            FROM journal_lines jl
            JOIN journal_entries je ON je.id = jl.entry_id AND je.tenant_id = jl.tenant_id
            JOIN accounts a ON a.tenant_id = je.tenant_id AND a.code = jl.account_code
-           WHERE je.tenant_id = $1
+           WHERE je.tenant_id = $1 AND a.type = 'revenue'
              AND je.entry_date >= ($2::date - INTERVAL '${FORECAST_MOVING_AVERAGE_MONTHS} months')
              AND je.entry_date < $2::date
-           GROUP BY je.entry_date
          )
          SELECT
            COALESCE(SUM(CASE WHEN account_type = 'revenue' THEN credit - debit ELSE 0 END), 0) AS income,
@@ -113,7 +111,7 @@ export class PgViewsRepository implements ViewsRepository {
              JOIN accounts a ON a.tenant_id = je.tenant_id AND a.code = jl.account_code
              WHERE je.tenant_id = $1 AND je.entry_date <= $3 AND a.code IN ('1001','1002','1003')
            ), 0) AS net_cash_balance,
-           COALESCE((SELECT AVG(net_revenue) FROM trailing_period), 0) * ${FORECAST_MOVING_AVERAGE_MONTHS} AS forecast_next_month
+           GREATEST(COALESCE((SELECT net_revenue_3mo FROM trailing_total), 0) / ${FORECAST_MOVING_AVERAGE_MONTHS}::numeric, 0) AS forecast_next_month
          FROM period_lines`,
         [tenantId, fromDate, toDate],
       );

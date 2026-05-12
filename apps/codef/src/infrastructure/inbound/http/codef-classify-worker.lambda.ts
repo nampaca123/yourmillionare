@@ -17,6 +17,7 @@ import { logger } from '../../../shared/logging/logger.js';
 const CLASSIFY_MODE = process.env.CLASSIFY_MODE ?? 'bedrock';
 const SYSTEM_USER_UUID = process.env.SYSTEM_USER_UUID ?? '00000000-0000-0000-0000-000000000001';
 const SOURCE = 'codef_bank' as const;
+const DRAFT_CONFIDENCE_THRESHOLD = Number.parseFloat(process.env.DRAFT_CONFIDENCE_THRESHOLD ?? '0.5');
 
 const classifier: TransactionClassifier =
   CLASSIFY_MODE === 'bedrock' ? new BedrockConverseClassifier() : new DeterministicStubClassifier();
@@ -98,6 +99,32 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
           memo: counterparty,
         });
 
+        if (classifyResult.confidence < DRAFT_CONFIDENCE_THRESHOLD) {
+          await client.query(
+            `INSERT INTO journal_entry_draft
+               (raw_transaction_id, tenant_id, draft_lines, heuristic_confidence, rule_id)
+             VALUES ($1, $2, $3::jsonb, $4, $5)
+             ON CONFLICT (raw_transaction_id) DO UPDATE
+               SET draft_lines = EXCLUDED.draft_lines,
+                   heuristic_confidence = EXCLUDED.heuristic_confidence,
+                   rule_id = EXCLUDED.rule_id`,
+            [
+              rawTransactionId,
+              tenantId,
+              JSON.stringify(classifyResult.lines),
+              classifyResult.confidence,
+              `bedrock:${classifyResult.modelId}`,
+            ],
+          );
+          await markDispatched(client, [rawTransactionId]);
+          await client.query('COMMIT');
+          log.info(
+            { rawTransactionId, confidence: classifyResult.confidence, threshold: DRAFT_CONFIDENCE_THRESHOLD },
+            'Low-confidence classification routed to journal_entry_draft for user review',
+          );
+          continue;
+        }
+
         const entry = createJournalEntry({
           tenantId,
           entryDate,
@@ -128,6 +155,10 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
               classifyResult.outputTokens ?? null,
               classifyResult.confidence,
             ],
+          );
+          await client.query(
+            `DELETE FROM journal_entry_draft WHERE raw_transaction_id = $1 AND tenant_id = $2`,
+            [rawTransactionId, tenantId],
           );
         }
 

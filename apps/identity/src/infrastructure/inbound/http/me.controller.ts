@@ -12,6 +12,8 @@ export const buildMeController =
     const user = await ensureUser.execute({ cognitoSub: claims.cognitoSub, email: claims.email });
     const tenant = await ensurePersonalTenant.execute(user);
 
+    const tenantType = tenant.businessType === 'personal' ? 'personal' : 'corporation';
+
     return {
       statusCode: 200,
       body: JSON.stringify({
@@ -19,6 +21,7 @@ export const buildMeController =
         cognitoSub: user.cognitoSub,
         email: user.email,
         defaultTenantId: tenant.id,
+        tenantType,
       }),
     };
   };

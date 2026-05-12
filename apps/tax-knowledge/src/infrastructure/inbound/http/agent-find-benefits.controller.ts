@@ -1,4 +1,4 @@
-// Controller: POST /tenants/{tenantId}/agent/find-benefits — stubs the corporation-profile-driven benefits search until Wave-5.
+// Controller: POST /tenants/{tenantId}/agent/find-benefits — wraps the FindApplicableBenefitsUseCase with tenantType routing.
 
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { z, ZodError } from 'zod';
@@ -8,6 +8,7 @@ import { parseClaims } from './auth-claims.mapper.js';
 
 const BodySchema = z.object({
   asOfDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  tenantType: z.enum(['personal', 'corporation']).default('corporation'),
   corpProfile: z
     .object({
       industryCode: z.string(),
@@ -15,6 +16,7 @@ const BodySchema = z.object({
       isYouthFounder: z.boolean(),
       hqSigungu: z.string(),
       priorYearRevenue: z.number().nonnegative(),
+      priorYearCorpTax: z.number().nonnegative().optional(),
       isVentureCertified: z.boolean().optional(),
       isExternalAudit: z.boolean().optional(),
     })
@@ -44,13 +46,15 @@ export const buildFindBenefitsController =
     };
     const result = await useCase.execute({
       tenantId,
+      tenantType: parsed.data.tenantType,
       asOfDate: parsed.data.asOfDate,
       profile: {
         industryCode: profile.industryCode || null,
         foundedAt: profile.foundedAt || null,
         isYouthFounder: profile.isYouthFounder,
         hqSigungu: profile.hqSigungu || null,
-        priorYearCorpTax: null,
+        priorYearCorpTax: profile.priorYearCorpTax ?? null,
+        priorYearRevenue: profile.priorYearRevenue,
       },
     });
     return { statusCode: 200, body: JSON.stringify(result) };

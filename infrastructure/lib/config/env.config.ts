@@ -5,7 +5,7 @@ import { z } from 'zod';
 const DEFAULT_REGION = 'ap-northeast-2';
 const DEFAULT_RERANK_REGION = 'ap-northeast-1';
 const DEFAULT_RERANK_MODEL = 'cohere.rerank-v3-5:0';
-const DEFAULT_EMBED_MODEL = 'cohere.embed-multilingual-v3';
+const DEFAULT_EMBED_MODEL = 'amazon.titan-embed-text-v2:0';
 const DEFAULT_RERANK_DAILY_LIMIT = '20';
 const DEFAULT_ADMIN_GROUP = 'ym-tax-admin';
 const DEFAULT_VPC_CIDR = '10.20.0.0/16';

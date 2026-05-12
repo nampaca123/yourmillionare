@@ -80,9 +80,9 @@ describe('DataStack (dev)', () => {
     });
   });
 
-  it('should have Aurora serverless scaling config with min 0 for dev when synthesized', () => {
+  it('should have Aurora serverless scaling config with min 0.5 for dev when synthesized', () => {
     template.hasResourceProperties('AWS::RDS::DBCluster', {
-      ServerlessV2ScalingConfiguration: { MinCapacity: 0, MaxCapacity: 2 },
+      ServerlessV2ScalingConfiguration: { MinCapacity: 0.5, MaxCapacity: 2 },
     });
   });
 

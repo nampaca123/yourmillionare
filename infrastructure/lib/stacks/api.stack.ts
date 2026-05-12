@@ -36,6 +36,7 @@ export interface ApiStackProps extends StackProps {
   readonly codefSecret: ISecret;
   readonly manualSyncStateMachineArn?: string;
   readonly legalSyncStateMachineArn?: string;
+  readonly legalKbId?: string;
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -47,7 +48,7 @@ const TAX_KNOWLEDGE_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax-knowledge/
 const BEDROCK_PROFILE_ID = 'global.anthropic.claude-sonnet-4-6';
 const RERANK_REGION_DEFAULT = 'ap-northeast-1';
 const RERANK_MODEL_DEFAULT = 'cohere.rerank-v3-5:0';
-const EMBED_MODEL_DEFAULT = 'cohere.embed-multilingual-v3';
+const EMBED_MODEL_DEFAULT = 'amazon.titan-embed-text-v2:0';
 
 export class ApiStack extends Stack {
   public readonly httpApi: HttpApi;
@@ -264,7 +265,7 @@ export class ApiStack extends Stack {
         DATABASE_NAME: 'yourmillionare',
         APP_REGION: region,
         LOG_LEVEL: isProd ? 'info' : 'debug',
-        BEDROCK_KB_ID: process.env.BEDROCK_KB_ID ?? '',
+        BEDROCK_KB_ID: props.legalKbId ?? process.env.BEDROCK_KB_ID ?? '',
         BEDROCK_KB_REGION: kbRegion,
         BEDROCK_RERANK_REGION: rerankRegion,
         BEDROCK_RERANK_MODEL: rerankModel,
