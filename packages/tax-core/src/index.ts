@@ -28,3 +28,8 @@ export type {
   BenefitCandidate,
 } from './benefits/youth-founder-eligibility.js';
 export { evaluateYouthFounderBenefit, estimateAnnualSavings } from './benefits/youth-founder-eligibility.js';
+export type { SmeBenefitInput } from './benefits/sme-special-deduction.js';
+export { evaluateSmeSpecialDeduction } from './benefits/sme-special-deduction.js';
+export type { RndBenefitInput } from './benefits/rnd-tax-credit.js';
+export { evaluateRndTaxCredit } from './benefits/rnd-tax-credit.js';
+export { evaluateIntegratedIncomeYouthFounder } from './benefits/integrated-income-youth.js';

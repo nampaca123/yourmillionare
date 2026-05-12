@@ -3,6 +3,10 @@
 import {
   estimateAnnualSavings,
   evaluateYouthFounderBenefit,
+  evaluateSmeSpecialDeduction,
+  evaluateRndTaxCredit,
+  evaluateIntegratedIncomeYouthFounder,
+  type BenefitCandidate,
   type CorporationProfileForBenefits,
 } from '@ym/tax-core';
 import type { BedrockKbClient, KbCitation } from '../infrastructure/outbound/bedrock/bedrock-kb.client.js';
@@ -10,10 +14,13 @@ import type { DdbBenefitsCacheAdapter } from '../infrastructure/outbound/ddb/ddb
 
 const DISCLAIMER = '본 산정은 추정치이며 실제 적용은 세무사 확인이 필요합니다.';
 
+export type TenantType = 'personal' | 'corporation';
+
 export interface FindBenefitsInput {
   readonly tenantId: string;
   readonly asOfDate: string;
-  readonly profile: CorporationProfileForBenefits;
+  readonly tenantType: TenantType;
+  readonly profile: CorporationProfileForBenefits & { readonly priorYearRevenue?: number | null };
 }
 
 export interface BenefitResult {
@@ -42,10 +49,21 @@ export interface FindBenefitsResponse {
   };
 }
 
-const KB_QUERY_TEMPLATE = (profile: CorporationProfileForBenefits): string =>
-  `청년창업자 ${profile.isYouthFounder ? '예' : '아니오'} / 업종 ${profile.industryCode ?? 'unknown'} / 본점 ${profile.hqSigungu ?? 'unknown'} / 창업 ${profile.foundedAt ?? 'unknown'} — 적용 가능한 조세특례제한법 §6 청년창업감면 조건`;
-
 const PROFILE_BASED_CONFIDENCE = 0.85;
+const KB_RESULT_LIMIT = 20;
+const HORIZON_YEARS_FOR_OPEN_ENDED = 5;
+
+const kbQueryFor = (candidate: BenefitCandidate, profile: CorporationProfileForBenefits): string =>
+  `${candidate.benefitName} 적용 요건. 업종 ${profile.industryCode ?? 'unknown'} / 본점 ${profile.hqSigungu ?? 'unknown'} / 창업 ${profile.foundedAt ?? 'unknown'}`;
+
+const summarizeRate = (candidate: BenefitCandidate): string => {
+  const pct = `${(candidate.deductionRate * 100).toFixed(0)}%`;
+  const horizon = candidate.maxYears >= 100 ? '연 단위 반복 적용' : `${candidate.maxYears}년`;
+  return `${pct} 감면 × ${horizon}`;
+};
+
+const horizonYears = (candidate: BenefitCandidate): number =>
+  candidate.maxYears >= 100 ? HORIZON_YEARS_FOR_OPEN_ENDED : candidate.maxYears;
 
 export class FindApplicableBenefitsUseCase {
   constructor(
@@ -54,6 +72,48 @@ export class FindApplicableBenefitsUseCase {
     private readonly lastSyncedAt: () => Promise<string | null>,
   ) {}
 
+  private async fetchCitations(
+    candidate: BenefitCandidate,
+    profile: CorporationProfileForBenefits,
+    asOfDate: string,
+  ): Promise<ReadonlyArray<KbCitation>> {
+    if (!this.kb || !candidate.eligible) return [];
+    try {
+      const result = await this.kb.search({
+        query: kbQueryFor(candidate, profile),
+        asOfDate,
+        lawId: candidate.applicableForLawId,
+        numberOfResults: KB_RESULT_LIMIT,
+      });
+      return [...result.citations].sort((a, b) => (a.articleNumber ?? '').localeCompare(b.articleNumber ?? ''));
+    } catch {
+      return [];
+    }
+  }
+
+  private buildBenefit(
+    candidate: BenefitCandidate,
+    citations: ReadonlyArray<KbCitation>,
+    priorYearCorpTax: number | null,
+  ): BenefitResult {
+    const annualSavings = estimateAnnualSavings(priorYearCorpTax, candidate);
+    const totalSavings = annualSavings * horizonYears(candidate);
+    return {
+      benefitId: candidate.benefitId,
+      benefitName: candidate.benefitName,
+      lawArticle: candidate.lawArticleRef,
+      eligibility: { verified: candidate.eligible, rules: candidate.rules },
+      estimatedSavings: {
+        amount: totalSavings,
+        currency: 'KRW',
+        basis: `${summarizeRate(candidate)} (prior_year_corp_tax 기준)`,
+      },
+      confidence: candidate.eligible ? PROFILE_BASED_CONFIDENCE : 0,
+      citations,
+      requiresVerification: true,
+    };
+  }
+
   async execute(input: FindBenefitsInput): Promise<FindBenefitsResponse> {
     const profileHash = this.cache.hashProfile(input.profile);
     const cached = await this.cache.get(input.tenantId, profileHash, input.asOfDate);
@@ -61,41 +121,20 @@ export class FindApplicableBenefitsUseCase {
       return { ...cached.payload, verification: { ...cached.payload.verification, cacheHit: true } };
     }
 
-    const candidate = evaluateYouthFounderBenefit(input.profile, input.asOfDate);
-    const annualSavings = estimateAnnualSavings(input.profile.priorYearCorpTax, candidate);
-    const totalSavings = annualSavings * candidate.maxYears;
+    const candidates: ReadonlyArray<BenefitCandidate> = input.tenantType === 'personal'
+      ? [evaluateIntegratedIncomeYouthFounder(input.profile, input.asOfDate)]
+      : [
+          evaluateYouthFounderBenefit(input.profile, input.asOfDate),
+          evaluateSmeSpecialDeduction(input.profile, input.asOfDate),
+          evaluateRndTaxCredit(input.profile, input.asOfDate),
+        ];
 
-    let citations: ReadonlyArray<KbCitation> = [];
-    if (this.kb && candidate.eligible) {
-      try {
-        const result = await this.kb.search({
-          query: KB_QUERY_TEMPLATE(input.profile),
-          asOfDate: input.asOfDate,
-          lawId: candidate.applicableForLawId,
-          numberOfResults: 20,
-        });
-        citations = [...result.citations].sort((a, b) => (a.articleNumber ?? '').localeCompare(b.articleNumber ?? ''));
-      } catch {
-        citations = [];
-      }
-    }
-
-    const benefits: BenefitResult[] = [
-      {
-        benefitId: candidate.benefitId,
-        benefitName: candidate.benefitName,
-        lawArticle: candidate.lawArticleRef,
-        eligibility: { verified: candidate.eligible, rules: candidate.rules },
-        estimatedSavings: {
-          amount: totalSavings,
-          currency: 'KRW',
-          basis: `${(candidate.deductionRate * 100).toFixed(0)}% 감면 × ${candidate.maxYears}년 (prior_year_corp_tax 기준)`,
-        },
-        confidence: candidate.eligible ? PROFILE_BASED_CONFIDENCE : 0,
-        citations,
-        requiresVerification: true,
-      },
-    ];
+    const benefits = await Promise.all(
+      candidates.map(async (candidate) => {
+        const citations = await this.fetchCitations(candidate, input.profile, input.asOfDate);
+        return this.buildBenefit(candidate, citations, input.profile.priorYearCorpTax);
+      }),
+    );
 
     const lastSyncedAt = await this.lastSyncedAt();
     const STALE_MS = 30 * 86_400_000;

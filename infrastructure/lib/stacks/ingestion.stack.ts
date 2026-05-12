@@ -27,6 +27,7 @@ import type { Construct } from 'constructs';
 
 import type { DeploymentEnv } from '../config/env.config.js';
 import type { AuroraConstruct } from './data/aurora.construct.js';
+import { LegalKbConstruct } from './ingestion/legal-kb.construct.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -36,6 +37,7 @@ const CLASSIFY_WORKER_ENTRY = join(__dirname, '../../../apps/codef/src/infrastru
 const FX_COLLECTOR_ENTRY = join(__dirname, '../../../apps/fx/src/infrastructure/inbound/fx-collector.lambda.ts');
 const HOLIDAY_SYNC_ENTRY = join(__dirname, '../../../apps/tax/src/infrastructure/inbound/scheduled/holiday-yearly-sync.lambda.ts');
 const LAW_SYNC_ENTRY = join(__dirname, '../../../apps/tax-knowledge/src/infrastructure/inbound/scheduled/monthly-law-sync.lambda.ts');
+const FILING_GENERATOR_ENTRY = join(__dirname, '../../../apps/tax/src/infrastructure/inbound/scheduled/filing-obligation-generator.lambda.ts');
 
 const BEDROCK_PROFILE_ID = 'global.anthropic.claude-sonnet-4-6';
 
@@ -46,11 +48,14 @@ export interface IngestionStackProps extends StackProps {
   readonly aurora: AuroraConstruct;
   readonly codefSecretArn: string;
   readonly transactionCache: ITable;
+  readonly bedrockEmbedModel: string;
 }
 
 export class IngestionStack extends Stack {
   public readonly manualSyncStateMachineArn: string;
   public readonly legalSyncStateMachineArn: string;
+  public readonly legalKbId: string;
+  public readonly legalKbDataSourceId: string;
 
   constructor(scope: Construct, id: string, props: IngestionStackProps) {
     super(scope, id, props);
@@ -220,6 +225,20 @@ export class IngestionStack extends Stack {
     });
     holidaySyncFn.addToRolePolicy(rdsConnectPolicy);
 
+    // --- Monthly filing-obligation generator — materialises VAT/CORP/WH calendar per tenant ---
+    const filingGeneratorFn = new NodejsFunction(this, 'FilingObligationGeneratorFn', {
+      entry: FILING_GENERATOR_ENTRY,
+      handler: 'handler',
+      runtime: Runtime.NODEJS_20_X,
+      architecture: Architecture.ARM_64,
+      memorySize: 512,
+      timeout: Duration.minutes(2),
+      ...commonVpcConfig,
+      environment: commonEnv,
+      bundling: commonBundling,
+    });
+    filingGeneratorFn.addToRolePolicy(rdsConnectPolicy);
+
     // --- Monthly OPEN_LAW corpus sync — fetches latest revisions + uploads raw to LegalKbBucket ---
     const lawSyncFn = new NodejsFunction(this, 'MonthlyLawSyncFn', {
       entry: LAW_SYNC_ENTRY,
@@ -295,7 +314,7 @@ export class IngestionStack extends Stack {
       },
     ];
 
-    for (const fn of [tenantsListFn, codefFetchFn, classifyWorkerFn, holidaySyncFn, lawSyncFn]) {
+    for (const fn of [tenantsListFn, codefFetchFn, classifyWorkerFn, holidaySyncFn, lawSyncFn, filingGeneratorFn]) {
       NagSuppressions.addResourceSuppressions(fn, vpcLambdaSuppressions, true);
     }
     NagSuppressions.addResourceSuppressions(lawSyncFn, [
@@ -400,13 +419,49 @@ export class IngestionStack extends Stack {
       exportName: `${id}-ManualSyncStateMachineArn`,
     });
 
+    // --- Bedrock Knowledge Base over the legal corpus (S3 Vectors backend, Cohere embed-v4 in Seoul) ---
+    const isProdEnv = props.deploymentEnv === 'prod';
+    const vectorBucketName = `ym-${isProdEnv ? 'prod' : 'dev'}-legal-kb-v2-${account}`.toLowerCase();
+    const legalKb = new LegalKbConstruct(this, 'LegalKbV2', {
+      corpusBucket: legalKbBucket,
+      kbName: `legal-kb-${isProdEnv ? 'prod' : 'dev'}`,
+      vectorBucketName,
+      embedModel: props.bedrockEmbedModel,
+      embedDimension: 1024,
+      embedRegion: region,
+    });
+    this.legalKbId = legalKb.kbId;
+    this.legalKbDataSourceId = legalKb.dataSourceId;
+    new CfnOutput(this, 'LegalKbId', {
+      value: legalKb.kbId,
+      description: 'Bedrock Knowledge Base id wired into TaxKnowledge Lambda via env BEDROCK_KB_ID.',
+      exportName: `${id}-LegalKbId`,
+    });
+    new CfnOutput(this, 'LegalKbDataSourceId', {
+      value: legalKb.dataSourceId,
+      description: 'Bedrock Knowledge Base data source id used by LegalSyncStateMachine StartIngestionJob task.',
+      exportName: `${id}-LegalKbDataSourceId`,
+    });
+
     // --- LegalSyncStateMachine: monthly 법제처 OPEN_LAW corpus sync orchestrator ---
     const lawSyncTask = new tasks.LambdaInvoke(this, 'MonthlyLawSyncInvoke', {
       lambdaFunction: lawSyncFn,
       payloadResponseOnly: true,
+      resultPath: '$.lawSyncOut',
+    });
+    const kbIngestionTask = new tasks.CallAwsService(this, 'StartLegalKbIngestion', {
+      service: 'bedrockagent',
+      action: 'startIngestionJob',
+      parameters: {
+        KnowledgeBaseId: legalKb.kbId,
+        DataSourceId: legalKb.dataSourceId,
+      },
+      iamResources: [legalKb.kbArn],
+      iamAction: 'bedrock:StartIngestionJob',
+      resultPath: '$.kbIngest',
     });
     const legalSyncSm = new sfn.StateMachine(this, 'LegalSyncStateMachine', {
-      definitionBody: sfn.DefinitionBody.fromChainable(lawSyncTask),
+      definitionBody: sfn.DefinitionBody.fromChainable(lawSyncTask.next(kbIngestionTask)),
       tracingEnabled: true,
     });
 
@@ -417,6 +472,9 @@ export class IngestionStack extends Stack {
     new Rule(this, 'HolidayMonthlyRefreshRule', {
       schedule: Schedule.cron({ minute: '0', hour: '18', day: '1' }),
     }).addTarget(new LambdaFunction(holidaySyncFn));
+    new Rule(this, 'FilingObligationGeneratorRule', {
+      schedule: Schedule.cron({ minute: '0', hour: '17', day: '1' }),
+    }).addTarget(new LambdaFunction(filingGeneratorFn));
     this.legalSyncStateMachineArn = legalSyncSm.stateMachineArn;
     new CfnOutput(this, 'LegalSyncStateMachineArn', {
       value: legalSyncSm.stateMachineArn,

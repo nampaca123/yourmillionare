@@ -1,7 +1,7 @@
 // Client: calls CODEF /v1/kr/bank/p/account/transaction-list and maps to RawBankTransaction[].
 
 import { AppError } from '@ym/shared-errors';
-import type { CodefTxResponse, RawBankTransaction } from './codef.types.js';
+import type { CodefTxResponse, FetchTransactionsResult, RawBankTransaction } from './codef.types.js';
 import { getAccessToken } from './codef-auth.client.js';
 
 const CODEF_API_BASE = 'https://development.codef.io';
@@ -30,7 +30,7 @@ export const fetchTransactions = async (params: {
   accountNumber: string;
   startDate: string;
   endDate: string;
-}): Promise<RawBankTransaction[]> => {
+}): Promise<FetchTransactionsResult> => {
   const token = await getAccessToken();
 
   const body = JSON.stringify({
@@ -70,7 +70,7 @@ export const fetchTransactions = async (params: {
 
   const rows = data.data?.resTrHistoryList ?? [];
 
-  return rows.map((row): RawBankTransaction => {
+  const transactions = rows.map((row): RawBankTransaction => {
     const date = row.resAccountTrDate;
     const time = row.resAccountTrTime;
     const out = row.resAccountOut;
@@ -92,4 +92,20 @@ export const fetchTransactions = async (params: {
       rawPayload: row,
     };
   });
+
+  const accountBalanceRaw = data.data?.resAccountBalance;
+  const lastRowBalance = rows.length > 0 ? rows[rows.length - 1]?.resAfterTranBalance : undefined;
+  const balanceSource = accountBalanceRaw ?? lastRowBalance;
+  const withdrawableRaw = data.data?.resWithdrawalAmt;
+
+  return {
+    transactions,
+    balance: balanceSource
+      ? {
+          currentBalanceKrw: parseKrwAmount(balanceSource),
+          withdrawableKrw: withdrawableRaw ? parseKrwAmount(withdrawableRaw) : null,
+          syncedAt: new Date(),
+        }
+      : null,
+  };
 };

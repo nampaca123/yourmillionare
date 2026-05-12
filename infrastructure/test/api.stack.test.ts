@@ -85,8 +85,8 @@ describe('ApiStack (dev)', () => {
     template.resourceCountIs('AWS::ApiGatewayV2::Authorizer', 1);
   });
 
-  it('should create exactly 9 routes when synthesized', () => {
-    template.resourceCountIs('AWS::ApiGatewayV2::Route', 9);
+  it('should create exactly 41 routes when synthesized', () => {
+    template.resourceCountIs('AWS::ApiGatewayV2::Route', 41);
   });
 
   it('should create 1 Lambda function for the identity handler when synthesized', () => {

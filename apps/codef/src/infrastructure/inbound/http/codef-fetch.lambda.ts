@@ -7,6 +7,7 @@ import { sendTaskBatch } from '../../outbound/sqs/classify-dispatcher.client.js'
 import { logger } from '../../../shared/logging/logger.js';
 
 const DEFAULT_LOOKBACK_DAYS = 2;
+const INITIAL_LOOKBACK_DAYS = 31;
 const SOURCE = 'codef_bank';
 
 interface FetchPayload {
@@ -69,14 +70,14 @@ export const handler = async (event: FetchPayload): Promise<FetchResult> => {
     );
 
     const startDateObj = latestFetchedAt
-      ? new Date(latestFetchedAt.getTime() - 24 * 60 * 60 * 1000)
-      : new Date(Date.now() - DEFAULT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+      ? new Date(latestFetchedAt.getTime() - DEFAULT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000)
+      : new Date(Date.now() - INITIAL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
 
     const startDate = toDateStr(startDateObj);
 
     log.info({ organization: account.organization, startDate, endDate }, 'Fetching CODEF transactions');
 
-    const transactions = await fetchTransactions({
+    const fetchResult = await fetchTransactions({
       connectedId: account.connected_id,
       organization: account.organization,
       accountNumber: account.account_number,
@@ -84,12 +85,32 @@ export const handler = async (event: FetchPayload): Promise<FetchResult> => {
       endDate,
     });
 
-    totalFetched += transactions.length;
+    totalFetched += fetchResult.transactions.length;
 
-    if (transactions.length === 0) continue;
+    if (fetchResult.balance) {
+      await withRlsContext({ cognitoSub: 'system', tenantId }, (client) =>
+        client.query(
+          `UPDATE tenant_bank_accounts
+              SET last_balance_krw      = $1,
+                  last_withdrawable_krw = $2,
+                  balance_synced_at     = $3
+            WHERE tenant_id = $4 AND organization = $5 AND account_number = $6`,
+          [
+            fetchResult.balance.currentBalanceKrw,
+            fetchResult.balance.withdrawableKrw,
+            fetchResult.balance.syncedAt,
+            tenantId,
+            account.organization,
+            account.account_number,
+          ],
+        ),
+      );
+    }
+
+    if (fetchResult.transactions.length === 0) continue;
 
     const newIds = await withRlsContext({ cognitoSub: 'system', tenantId }, (client) =>
-      upsertBatch(client, tenantId, SOURCE, transactions),
+      upsertBatch(client, tenantId, SOURCE, fetchResult.transactions),
     );
 
     allNewIds.push(...newIds);

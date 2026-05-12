@@ -27,7 +27,11 @@ export interface CodefTxRow {
 
 export interface CodefTxResponse {
   result: { code: string; message: string };
-  data: { resTrHistoryList: CodefTxRow[] };
+  data: {
+    resAccountBalance?: string;
+    resWithdrawalAmt?: string;
+    resTrHistoryList: CodefTxRow[];
+  };
 }
 
 export interface RawBankTransaction {
@@ -36,4 +40,15 @@ export interface RawBankTransaction {
   amount: number;
   counterparty?: string;
   rawPayload: CodefTxRow;
+}
+
+export interface AccountBalanceSnapshot {
+  currentBalanceKrw: number;
+  withdrawableKrw: number | null;
+  syncedAt: Date;
+}
+
+export interface FetchTransactionsResult {
+  transactions: RawBankTransaction[];
+  balance: AccountBalanceSnapshot | null;
 }
