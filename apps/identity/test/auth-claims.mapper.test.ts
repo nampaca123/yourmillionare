@@ -26,8 +26,14 @@ describe('parseClaims', () => {
     expect(() => parseClaims(claims)).toThrow(UnauthorizedError);
   });
 
-  it('should throw UnauthorizedError when sub is not a valid UUID', () => {
-    const claims = { ...validClaims, sub: 'not-a-uuid' };
+  it('should accept federated provider sub (non-UUID) like Google_xxx', () => {
+    const claims = { ...validClaims, sub: 'Google_117498919707818623282' };
+
+    expect(() => parseClaims(claims)).not.toThrow();
+  });
+
+  it('should throw UnauthorizedError when sub is empty', () => {
+    const claims = { ...validClaims, sub: '' };
 
     expect(() => parseClaims(claims)).toThrow(UnauthorizedError);
   });

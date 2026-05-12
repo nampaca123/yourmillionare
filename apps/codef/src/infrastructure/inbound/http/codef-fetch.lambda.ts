@@ -1,9 +1,25 @@
-// Lambda entry point: fetches CODEF bank transactions per tenant and queues them for classification.
+// Lambda entry point: fetches CODEF bank transactions per tenant, records per-account outcomes, and queues new tx for classification.
 
+import type { PoolClient } from 'pg';
 import { withRlsContext } from '../../outbound/pg/pg-rls.context.js';
 import { fetchTransactions } from '../../outbound/codef/codef-bank.client.js';
-import { upsertBatch, markDispatched, findLatestFetchedAt } from '../../outbound/pg/pg-raw-transaction.repository.js';
+import {
+  upsertBatch,
+  markDispatched,
+  findLatestFetchedAt,
+} from '../../outbound/pg/pg-raw-transaction.repository.js';
+import {
+  markSyncRunRunning,
+  completeSyncRun,
+  failSyncRun,
+  recordAccountOutcome,
+  type SyncRunAccountOutcome,
+} from '../../outbound/pg/pg-sync-run.repository.js';
 import { sendTaskBatch } from '../../outbound/sqs/classify-dispatcher.client.js';
+import {
+  mapCodefErrorToUserMessage,
+  NO_CONNECTION_USER_MESSAGE,
+} from '../../../application/codef-error-messages.js';
 import { logger } from '../../../shared/logging/logger.js';
 
 const DEFAULT_LOOKBACK_DAYS = 2;
@@ -12,18 +28,33 @@ const SOURCE = 'codef_bank';
 
 interface FetchPayload {
   tenantId: string;
+  syncRunId?: string;
 }
 
 interface FetchResult {
   tenantId: string;
+  syncRunId: string | null;
   fetched: number;
   queued: number;
+  outcomes: { organization: string; outcome: SyncRunAccountOutcome }[];
 }
 
 interface BankAccountRow {
   organization: string;
   account_number: string;
   connected_id: string | null;
+}
+
+interface AccountResult {
+  organization: string;
+  accountNumber: string;
+  outcome: SyncRunAccountOutcome;
+  codefErrorCode?: string;
+  codefErrorMessage?: string;
+  userMessage?: string;
+  fetchedCount: number;
+  balanceUpdated: boolean;
+  newRawTxIds: string[];
 }
 
 const toDateStr = (date: Date): string => {
@@ -33,97 +64,250 @@ const toDateStr = (date: Date): string => {
   return `${y}${m}${d}`;
 };
 
-export const handler = async (event: FetchPayload): Promise<FetchResult> => {
-  const { tenantId } = event;
-  const log = logger.child({ fn: 'codef-fetch', tenantId });
+const summarize = (results: AccountResult[]): string => {
+  const success = results.filter((r) => r.outcome === 'success').length;
+  const errors = results.filter((r) => r.outcome === 'codef_error' || r.outcome === 'no_connection').length;
+  const empty = results.filter((r) => r.outcome === 'empty_result' || r.outcome === 'balance_only').length;
+  const parts: string[] = [];
+  if (success > 0) parts.push(`${success}개 계좌 동기화 완료`);
+  if (errors > 0) parts.push(`${errors}개 계좌 처리 필요`);
+  if (empty > 0) parts.push(`${empty}개 계좌 거래 내역 없음`);
+  return parts.length > 0 ? parts.join(', ') : '동기화할 계좌가 없습니다';
+};
 
-  const accounts = await withRlsContext({ cognitoSub: 'system', tenantId }, async (client) => {
-    const result = await client.query<BankAccountRow>(
-      `SELECT organization, account_number, connected_id
-       FROM tenant_bank_accounts
-       WHERE tenant_id = $1 AND is_active = TRUE`,
-      [tenantId],
-    );
-    return result.rows;
+const updateBalance = async (
+  tenantId: string,
+  account: BankAccountRow,
+  balance: { currentBalanceKrw: number; withdrawableKrw: number | null; syncedAt: Date },
+): Promise<boolean> => {
+  await withRlsContext({ cognitoSub: 'system', tenantId }, (client) =>
+    client.query(
+      `UPDATE tenant_bank_accounts
+          SET last_balance_krw      = $1,
+              last_withdrawable_krw = $2,
+              balance_synced_at     = $3
+        WHERE tenant_id = $4 AND organization = $5 AND account_number = $6`,
+      [
+        balance.currentBalanceKrw,
+        balance.withdrawableKrw,
+        balance.syncedAt,
+        tenantId,
+        account.organization,
+        account.account_number,
+      ],
+    ),
+  );
+  return true;
+};
+
+const processAccount = async (
+  tenantId: string,
+  account: BankAccountRow,
+  endDate: string,
+): Promise<AccountResult> => {
+  const base = {
+    organization: account.organization,
+    accountNumber: account.account_number,
+    fetchedCount: 0,
+    balanceUpdated: false,
+    newRawTxIds: [] as string[],
+  };
+
+  if (!account.connected_id) {
+    return { ...base, outcome: 'no_connection', userMessage: NO_CONNECTION_USER_MESSAGE };
+  }
+
+  const latestFetchedAt = await withRlsContext({ cognitoSub: 'system', tenantId }, (client) =>
+    findLatestFetchedAt(client, tenantId, SOURCE),
+  );
+
+  const startDateObj = latestFetchedAt
+    ? new Date(latestFetchedAt.getTime() - DEFAULT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000)
+    : new Date(Date.now() - INITIAL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+
+  const startDate = toDateStr(startDateObj);
+
+  const codefRes = await fetchTransactions({
+    connectedId: account.connected_id,
+    organization: account.organization,
+    accountNumber: account.account_number,
+    startDate,
+    endDate,
   });
 
-  if (accounts.length === 0) {
-    log.info('No active bank accounts for tenant');
-    return { tenantId, fetched: 0, queued: 0 };
+  if (!codefRes.ok) {
+    return {
+      ...base,
+      outcome: 'codef_error',
+      codefErrorCode: codefRes.code,
+      codefErrorMessage: codefRes.message,
+      userMessage: mapCodefErrorToUserMessage(account.organization, codefRes.code, codefRes.message),
+    };
   }
 
-  const endDate = toDateStr(new Date());
-  let totalFetched = 0;
-  const allNewIds: string[] = [];
+  const balanceUpdated = codefRes.data.balance
+    ? await updateBalance(tenantId, account, codefRes.data.balance)
+    : false;
 
-  for (const account of accounts) {
-    if (!account.connected_id) {
-      log.warn(
-        { organization: account.organization, accountNumber: account.account_number },
-        'connected_id missing for bank account; skipping',
-      );
-      continue;
+  if (codefRes.data.transactions.length === 0) {
+    return {
+      ...base,
+      outcome: balanceUpdated ? 'balance_only' : 'empty_result',
+      balanceUpdated,
+    };
+  }
+
+  const newIds = await withRlsContext({ cognitoSub: 'system', tenantId }, (client) =>
+    upsertBatch(client, tenantId, SOURCE, codefRes.data.transactions),
+  );
+
+  return {
+    ...base,
+    outcome: 'success',
+    balanceUpdated,
+    fetchedCount: codefRes.data.transactions.length,
+    newRawTxIds: newIds,
+  };
+};
+
+const recordOutcomes = async (
+  tenantId: string,
+  syncRunId: string,
+  results: AccountResult[],
+): Promise<void> => {
+  await withRlsContext({ cognitoSub: 'system', tenantId }, async (client) => {
+    for (const result of results) {
+      await recordAccountOutcome(client, {
+        syncRunId,
+        tenantId,
+        organization: result.organization,
+        accountNumber: result.accountNumber,
+        outcome: result.outcome,
+        codefErrorCode: result.codefErrorCode ?? null,
+        codefErrorMessage: result.codefErrorMessage ?? null,
+        userMessage: result.userMessage ?? null,
+        fetchedCount: result.fetchedCount,
+        balanceUpdated: result.balanceUpdated,
+      });
     }
+  });
+};
 
-    const latestFetchedAt = await withRlsContext({ cognitoSub: 'system', tenantId }, (client) =>
-      findLatestFetchedAt(client, tenantId, SOURCE),
+const finalizeSyncRun = async (
+  tenantId: string,
+  syncRunId: string,
+  results: AccountResult[],
+): Promise<void> => {
+  const successCount = results.filter((r) => r.outcome === 'success').length;
+  const errorCount = results.filter(
+    (r) => r.outcome === 'codef_error' || r.outcome === 'no_connection',
+  ).length;
+  const emptyCount = results.filter(
+    (r) => r.outcome === 'empty_result' || r.outcome === 'balance_only',
+  ).length;
+
+  await withRlsContext({ cognitoSub: 'system', tenantId }, (client: PoolClient) =>
+    completeSyncRun(client, {
+      syncRunId,
+      totalAccounts: results.length,
+      successCount,
+      errorCount,
+      emptyCount,
+      userSummary: summarize(results),
+    }),
+  );
+};
+
+export const handler = async (event: FetchPayload): Promise<FetchResult> => {
+  const { tenantId, syncRunId } = event;
+  const log = logger.child({ fn: 'codef-fetch', tenantId, syncRunId: syncRunId ?? null });
+
+  if (syncRunId) {
+    await withRlsContext({ cognitoSub: 'system', tenantId }, (client) =>
+      markSyncRunRunning(client, syncRunId),
     );
+  }
 
-    const startDateObj = latestFetchedAt
-      ? new Date(latestFetchedAt.getTime() - DEFAULT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000)
-      : new Date(Date.now() - INITIAL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+  let results: AccountResult[] = [];
 
-    const startDate = toDateStr(startDateObj);
-
-    log.info({ organization: account.organization, startDate, endDate }, 'Fetching CODEF transactions');
-
-    const fetchResult = await fetchTransactions({
-      connectedId: account.connected_id,
-      organization: account.organization,
-      accountNumber: account.account_number,
-      startDate,
-      endDate,
+  try {
+    const accounts = await withRlsContext({ cognitoSub: 'system', tenantId }, async (client) => {
+      const result = await client.query<BankAccountRow>(
+        `SELECT organization, account_number, connected_id
+         FROM tenant_bank_accounts
+         WHERE tenant_id = $1 AND is_active = TRUE`,
+        [tenantId],
+      );
+      return result.rows;
     });
 
-    totalFetched += fetchResult.transactions.length;
+    if (accounts.length === 0) {
+      log.info('No active bank accounts for tenant');
+      if (syncRunId) {
+        await finalizeSyncRun(tenantId, syncRunId, []);
+      }
+      return { tenantId, syncRunId: syncRunId ?? null, fetched: 0, queued: 0, outcomes: [] };
+    }
 
-    if (fetchResult.balance) {
+    const endDate = toDateStr(new Date());
+
+    for (const account of accounts) {
+      const result = await processAccount(tenantId, account, endDate);
+      log.info(
+        {
+          organization: account.organization,
+          accountNumber: account.account_number,
+          outcome: result.outcome,
+          codefErrorCode: result.codefErrorCode,
+        },
+        'Account processed',
+      );
+      results.push(result);
+    }
+
+    const allNewIds = results.flatMap((r) => r.newRawTxIds);
+    const totalFetched = results.reduce((sum, r) => sum + r.fetchedCount, 0);
+
+    if (allNewIds.length > 0) {
+      await sendTaskBatch(allNewIds.map((id) => ({ rawTransactionId: id, tenantId })));
+
       await withRlsContext({ cognitoSub: 'system', tenantId }, (client) =>
-        client.query(
-          `UPDATE tenant_bank_accounts
-              SET last_balance_krw      = $1,
-                  last_withdrawable_krw = $2,
-                  balance_synced_at     = $3
-            WHERE tenant_id = $4 AND organization = $5 AND account_number = $6`,
-          [
-            fetchResult.balance.currentBalanceKrw,
-            fetchResult.balance.withdrawableKrw,
-            fetchResult.balance.syncedAt,
-            tenantId,
-            account.organization,
-            account.account_number,
-          ],
-        ),
+        markDispatched(client, allNewIds),
       );
     }
 
-    if (fetchResult.transactions.length === 0) continue;
+    if (syncRunId) {
+      await recordOutcomes(tenantId, syncRunId, results);
+      await finalizeSyncRun(tenantId, syncRunId, results);
+    }
 
-    const newIds = await withRlsContext({ cognitoSub: 'system', tenantId }, (client) =>
-      upsertBatch(client, tenantId, SOURCE, fetchResult.transactions),
+    log.info(
+      { fetched: totalFetched, queued: allNewIds.length, accounts: results.length },
+      'Codef fetch complete',
     );
+    return {
+      tenantId,
+      syncRunId: syncRunId ?? null,
+      fetched: totalFetched,
+      queued: allNewIds.length,
+      outcomes: results.map((r) => ({ organization: r.organization, outcome: r.outcome })),
+    };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    log.error({ err, reason }, 'Codef fetch failed unexpectedly');
 
-    allNewIds.push(...newIds);
+    if (syncRunId) {
+      try {
+        if (results.length > 0) {
+          await recordOutcomes(tenantId, syncRunId, results);
+        }
+        await withRlsContext({ cognitoSub: 'system', tenantId }, (client) =>
+          failSyncRun(client, syncRunId, reason),
+        );
+      } catch (recordErr) {
+        log.error({ err: recordErr }, 'Failed to record sync_run failure');
+      }
+    }
+    throw err;
   }
-
-  if (allNewIds.length > 0) {
-    await sendTaskBatch(allNewIds.map((id) => ({ rawTransactionId: id, tenantId })));
-
-    await withRlsContext({ cognitoSub: 'system', tenantId }, (client) =>
-      markDispatched(client, allNewIds),
-    );
-  }
-
-  log.info({ fetched: totalFetched, queued: allNewIds.length }, 'Codef fetch complete');
-  return { tenantId, fetched: totalFetched, queued: allNewIds.length };
 };

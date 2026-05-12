@@ -1,30 +1,26 @@
-// Parses and validates Cognito ID Token JWT claims from API Gateway context.
+// Re-exports shared parseClaims plus tax-specific admin guard.
 
-import { z } from 'zod';
-import { UnauthorizedError } from '@ym/shared-errors';
+import { type AuthClaims, parseClaims as sharedParseClaims, requireGroup } from '@ym/shared-auth';
+import { ForbiddenError } from '@ym/shared-errors';
 
-const ClaimsSchema = z.object({
-  sub: z.string().uuid(),
-  email: z.string().email(),
-  token_use: z.literal('id'),
-  aud: z.string(),
-  'cognito:groups': z.array(z.string()).optional(),
-});
+const ADMIN_GROUP = process.env.ADMIN_COGNITO_GROUP ?? 'ym-tax-admin';
 
-export interface AuthClaims {
-  cognitoSub: string;
-  email: string;
-  groups: ReadonlyArray<string>;
+export type { AuthClaims };
+
+export interface TaxAuthClaims extends AuthClaims {
+  isTaxAdmin: boolean;
 }
 
-export const parseClaims = (raw: unknown): AuthClaims => {
-  const parsed = ClaimsSchema.safeParse(raw);
-  if (!parsed.success) {
-    throw new UnauthorizedError(`Invalid JWT claims: ${parsed.error.message}`);
+export const parseClaims = (raw: unknown): TaxAuthClaims => {
+  const claims = sharedParseClaims(raw);
+  return { ...claims, isTaxAdmin: claims.groups.includes(ADMIN_GROUP) };
+};
+
+export const requireTaxAdmin = (claims: AuthClaims): void => {
+  try {
+    requireGroup(claims, ADMIN_GROUP);
+  } catch (err) {
+    if (err instanceof ForbiddenError) throw new ForbiddenError('Tax admin group membership is required');
+    throw err;
   }
-  return {
-    cognitoSub: parsed.data.sub,
-    email: parsed.data.email,
-    groups: parsed.data['cognito:groups'] ?? [],
-  };
 };

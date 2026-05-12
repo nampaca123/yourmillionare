@@ -1,5 +1,6 @@
 // Use case: IAS 21 month-end revaluation — reads open FX balances, applies closing rates, posts unrealised gain/loss entry.
 
+import type { PoolClient } from 'pg';
 import { buildRevaluationLines, resolveRateWithWalkback, type ExchangeRate, type ExchangeRateClient, type OpenFxBalance } from '@ym/fx-core';
 import { getPool } from '../infrastructure/outbound/pg/pg-pool.client.js';
 
@@ -21,14 +22,14 @@ interface OpenBalanceRow {
 }
 
 const setRlsContext = async (
-  client: Awaited<ReturnType<Awaited<ReturnType<typeof getPool>>['connect']>>,
+  client: PoolClient,
   tenantId: string,
 ): Promise<void> => {
   await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
 };
 
 const readOpenBalances = async (
-  client: Awaited<ReturnType<Awaited<ReturnType<typeof getPool>>['connect']>>,
+  client: PoolClient,
   tenantId: string,
 ): Promise<ReadonlyArray<OpenFxBalance>> => {
   const result = await client.query<OpenBalanceRow>(

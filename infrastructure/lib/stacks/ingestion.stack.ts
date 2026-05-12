@@ -405,6 +405,7 @@ export class IngestionStack extends Stack {
       lambdaFunction: codefFetchFn,
       payload: sfn.TaskInput.fromObject({
         tenantId: sfn.JsonPath.stringAt('$.tenantId'),
+        syncRunId: sfn.JsonPath.stringAt('$.syncRunId'),
       }),
       payloadResponseOnly: true,
     });

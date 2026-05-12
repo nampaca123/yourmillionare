@@ -12,6 +12,8 @@ import { PgTenantMemberRepository } from './infrastructure/outbound/pg/pg-tenant
 import { PgAccountRepository } from './infrastructure/outbound/pg/pg-account.repository.js';
 import { PgJournalRepository } from './infrastructure/outbound/pg/pg-journal.repository.js';
 import { PgSyncStateRepository } from './infrastructure/outbound/pg/pg-sync-state.repository.js';
+import { PgSyncRunRepository } from './infrastructure/outbound/pg/pg-sync-run.repository.js';
+import { PgDraftRepository } from './infrastructure/outbound/pg/pg-draft.repository.js';
 import { PgViewsRepository } from './infrastructure/outbound/pg/pg-views.repository.js';
 import { PgReportsRepository } from './infrastructure/outbound/pg/pg-reports.repository.js';
 import { SfnSyncDispatcher } from './infrastructure/outbound/sfn/sfn-sync-dispatcher.adapter.js';
@@ -25,10 +27,16 @@ import { CreateJournalEntryUseCase } from './application/create-journal-entry.us
 import { ListJournalEntriesUseCase } from './application/list-journal-entries.use-case.js';
 import { StartTenantSyncUseCase } from './application/start-tenant-sync.use-case.js';
 import { GetSyncStatusUseCase } from './application/get-sync-status.use-case.js';
+import {
+  GetLatestSyncRunUseCase,
+  GetSyncRunUseCase,
+  ListSyncRunsUseCase,
+} from './application/get-sync-run.use-case.js';
 import { GetMonthlySummaryUseCase } from './application/get-monthly-summary.use-case.js';
 import { GetReceivablesUseCase, UpdateReceivableStatusUseCase } from './application/get-receivables.use-case.js';
 import { GetAccountBalancesUseCase } from './application/get-account-balances.use-case.js';
 import { ListDraftsUseCase } from './application/list-drafts.use-case.js';
+import { AcceptDraftUseCase } from './application/accept-draft.use-case.js';
 import {
   BuildBalanceSheetUseCase,
   BuildCashFlowUseCase,
@@ -40,6 +48,11 @@ import { buildCreateEntryController } from './infrastructure/inbound/http/create
 import { buildListEntriesController } from './infrastructure/inbound/http/list-entries.controller.js';
 import { buildSyncStartController } from './infrastructure/inbound/http/sync-start.controller.js';
 import { buildSyncStatusController } from './infrastructure/inbound/http/sync-status.controller.js';
+import {
+  buildGetSyncRunController,
+  buildLatestSyncRunController,
+  buildListSyncRunsController,
+} from './infrastructure/inbound/http/sync-runs.controller.js';
 import {
   buildAccountBalancesController,
   buildListDraftsController,
@@ -54,6 +67,7 @@ import {
   buildTrialBalanceController,
 } from './infrastructure/inbound/http/reports.controller.js';
 import { accountsChartController } from './infrastructure/inbound/http/accounts-chart.controller.js';
+import { buildAcceptDraftController } from './infrastructure/inbound/http/accept-draft.controller.js';
 import { buildPersistenceStore, buildIdempotencyConfig } from './infrastructure/inbound/http/idempotency.config.js';
 
 export type Handler = (event: APIGatewayProxyEventV2WithJWTAuthorizer) => Promise<APIGatewayProxyResultV2> | APIGatewayProxyResultV2;
@@ -65,6 +79,8 @@ const memberRepo = new PgTenantMemberRepository();
 const accountRepo = new PgAccountRepository();
 const journalRepo = new PgJournalRepository();
 const syncStateRepo = new PgSyncStateRepository();
+const syncRunRepo = new PgSyncRunRepository();
+const draftRepo = new PgDraftRepository();
 const viewsRepo = new PgViewsRepository();
 const reportsRepo = new PgReportsRepository();
 const syncDispatcher = new SfnSyncDispatcher();
@@ -81,13 +97,17 @@ const ensureSeeded = new EnsureAccountsSeededUseCase(accountRepo);
 const classifyTransaction = new ClassifyTransactionUseCase(classifier, journalRepo, costCounter, DAILY_LIMIT);
 const createEntry = new CreateJournalEntryUseCase(journalRepo, accountRepo, cacheProjector);
 const listEntries = new ListJournalEntriesUseCase(verifyMembership, journalRepo);
-const startTenantSync = new StartTenantSyncUseCase(verifyMembership, syncDispatcher);
+const startTenantSync = new StartTenantSyncUseCase(verifyMembership, syncDispatcher, syncRunRepo);
 const getSyncStatus = new GetSyncStatusUseCase(verifyMembership, syncStateRepo);
+const getSyncRun = new GetSyncRunUseCase(verifyMembership, syncRunRepo);
+const listSyncRuns = new ListSyncRunsUseCase(verifyMembership, syncRunRepo);
+const getLatestSyncRun = new GetLatestSyncRunUseCase(verifyMembership, syncRunRepo);
 const getMonthlySummary = new GetMonthlySummaryUseCase(verifyMembership, viewsRepo);
 const getReceivables = new GetReceivablesUseCase(verifyMembership, viewsRepo);
 const updateReceivable = new UpdateReceivableStatusUseCase(verifyMembership, viewsRepo);
 const getAccountBalances = new GetAccountBalancesUseCase(verifyMembership, viewsRepo);
 const listDrafts = new ListDraftsUseCase(verifyMembership, viewsRepo);
+const acceptDraft = new AcceptDraftUseCase(verifyMembership, draftRepo, journalRepo);
 const buildPnl = new BuildIncomeStatementUseCase(verifyMembership, reportsRepo);
 const buildBs = new BuildBalanceSheetUseCase(verifyMembership, reportsRepo);
 const buildTb = new BuildTrialBalanceUseCase(verifyMembership, reportsRepo);
@@ -98,11 +118,15 @@ const createEntryController = buildCreateEntryController(ensureUser, verifyMembe
 const listEntriesController = buildListEntriesController(ensureUser, listEntries);
 const syncStartController = buildSyncStartController(ensureUser, startTenantSync);
 const syncStatusController = buildSyncStatusController(ensureUser, getSyncStatus);
+const getSyncRunController = buildGetSyncRunController(ensureUser, getSyncRun);
+const listSyncRunsController = buildListSyncRunsController(ensureUser, listSyncRuns);
+const latestSyncRunController = buildLatestSyncRunController(ensureUser, getLatestSyncRun);
 const monthlySummaryController = buildMonthlySummaryController(ensureUser, getMonthlySummary);
 const receivablesController = buildReceivablesController(ensureUser, getReceivables);
 const updateReceivableController = buildUpdateReceivableController(ensureUser, updateReceivable);
 const balancesController = buildAccountBalancesController(ensureUser, getAccountBalances);
 const draftsController = buildListDraftsController(ensureUser, listDrafts);
+const acceptDraftController = buildAcceptDraftController(ensureUser, acceptDraft);
 const pnlController = buildPnlController(ensureUser, buildPnl);
 const balanceSheetController = buildBalanceSheetController(ensureUser, buildBs);
 const trialBalanceController = buildTrialBalanceController(ensureUser, buildTb);
@@ -143,8 +167,12 @@ export const container = {
     'POST /tenants/{tenantId}/journal/entries': createEntryController,
     'GET /tenants/{tenantId}/journal/entries': listEntriesController,
     'GET /tenants/{tenantId}/journal/drafts': draftsController,
-    'POST /tenants/{tenantId}/sync': syncStartWithIdempotencyMapped,
-    'GET /tenants/{tenantId}/sync/status': syncStatusController,
+    'POST /tenants/{tenantId}/journal/drafts/{rawTransactionId}/accept': acceptDraftController,
+    'POST /tenants/{tenantId}/fs/sync': syncStartWithIdempotencyMapped,
+    'GET /tenants/{tenantId}/fs/sync/status': syncStatusController,
+    'GET /tenants/{tenantId}/fs/sync/runs': listSyncRunsController,
+    'GET /tenants/{tenantId}/fs/sync/runs/latest': latestSyncRunController,
+    'GET /tenants/{tenantId}/fs/sync/runs/{syncRunId}': getSyncRunController,
     'GET /tenants/{tenantId}/summary/monthly': monthlySummaryController,
     'GET /tenants/{tenantId}/receivables': receivablesController,
     'PATCH /tenants/{tenantId}/receivables/{entryId}': updateReceivableController,
