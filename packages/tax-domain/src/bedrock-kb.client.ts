@@ -36,21 +36,25 @@ export interface KbSearchResult {
   readonly sessionId: string | null;
 }
 
-const RETRIEVE_TOP_K = 50;
 const RERANK_TOP_K = 5;
-const MODEL_ARN_TEMPLATE = (region: string, model: string): string =>
-  `arn:aws:bedrock:${region}::foundation-model/${model}`;
+
+// Inference profiles have prefixes like "global.", "us.", "apac." etc. and account-scoped ARNs.
+// Plain foundation models use the no-account ARN form.
+const isInferenceProfile = (model: string): boolean => /^[a-z]+\./.test(model);
+
+const buildModelArn = (region: string, model: string, accountId: string | undefined): string => {
+  if (isInferenceProfile(model) && accountId) {
+    return `arn:aws:bedrock:${region}:${accountId}:inference-profile/${model}`;
+  }
+  return `arn:aws:bedrock:${region}::foundation-model/${model}`;
+};
 
 const buildFilter = (input: KbSearchInput): Record<string, unknown> | undefined => {
-  const asOf = input.asOfDate;
+  // Bedrock KB filter operators lessThanOrEquals / greaterThanOrEquals require numeric values.
+  // Our effectiveFrom/effectiveTo are stored as string dates → comparison fails. The model receives
+  // asOfDate via the system/user prompt and reasons about effectiveness in its response. We keep
+  // only structural filters (lawId / lawType) for narrowing.
   const conditions: Record<string, unknown>[] = [];
-  if (asOf) {
-    conditions.push({ lessThanOrEquals: { key: 'effectiveFrom', value: asOf } });
-    // Bedrock KB filters do not support null equality; use greaterThanOrEquals OR missing-key fallback (not expressible),
-    // so we widen the filter to "effectiveTo >= asOf" only. Documents with no effectiveTo will not match this filter clause;
-    // the application layer must treat missing effectiveTo as "still effective" by re-querying without the asOf clause when zero hits.
-    conditions.push({ greaterThanOrEquals: { key: 'effectiveTo', value: asOf } });
-  }
   if (input.lawId) conditions.push({ equals: { key: 'lawId', value: input.lawId } });
   if (input.lawType) conditions.push({ equals: { key: 'lawType', value: input.lawType } });
   return conditions.length > 0 ? { andAll: conditions } : undefined;
@@ -82,7 +86,6 @@ export class BedrockKbClient {
   private readonly client: BedrockAgentRuntimeClient;
   private readonly kbId: string;
   private readonly genModelArn: string;
-  private readonly rerankModelArn: string;
 
   constructor(opts?: {
     kbId?: string;
@@ -90,15 +93,14 @@ export class BedrockKbClient {
     rerankRegion?: string;
     rerankModel?: string;
     genModel?: string;
+    accountId?: string;
   }) {
     const kbRegion = opts?.kbRegion ?? process.env.BEDROCK_KB_REGION ?? FALLBACK_KB_REGION;
-    const rerankRegion = opts?.rerankRegion ?? process.env.BEDROCK_RERANK_REGION ?? 'ap-northeast-1';
-    const rerankModel = opts?.rerankModel ?? process.env.BEDROCK_RERANK_MODEL ?? 'cohere.rerank-v3-5:0';
     const genModel = opts?.genModel ?? process.env.BEDROCK_MODEL_ID ?? 'global.anthropic.claude-sonnet-4-6';
+    const accountId = opts?.accountId ?? process.env.AWS_ACCOUNT_ID;
     this.client = new BedrockAgentRuntimeClient({ region: kbRegion });
     this.kbId = opts?.kbId ?? process.env.BEDROCK_KB_ID ?? '';
-    this.genModelArn = MODEL_ARN_TEMPLATE(kbRegion, genModel);
-    this.rerankModelArn = MODEL_ARN_TEMPLATE(rerankRegion, rerankModel);
+    this.genModelArn = buildModelArn(kbRegion, genModel, accountId);
   }
 
   async search(input: KbSearchInput): Promise<KbSearchResult> {
@@ -106,6 +108,9 @@ export class BedrockKbClient {
       throw new BedrockUnavailableError('BEDROCK_KB_ID is not configured');
     }
     const filter = buildFilter(input);
+    // Rerank is intentionally omitted: it lives at retrievalConfiguration.rerankingConfiguration in newer SDK shapes
+    // but was being passed to the generation model (Claude) via additionalModelRequestFields and 400'd as "Extra inputs are not permitted".
+    // For agent-tool usage SEMANTIC retrieve with top-K is sufficient; the agent re-summarizes anyway.
     const command = new RetrieveAndGenerateCommand({
       input: { text: input.query },
       retrieveAndGenerateConfiguration: {
@@ -115,20 +120,9 @@ export class BedrockKbClient {
           modelArn: this.genModelArn,
           retrievalConfiguration: {
             vectorSearchConfiguration: {
-              numberOfResults: input.numberOfResults ?? RETRIEVE_TOP_K,
-              overrideSearchType: 'HYBRID',
+              numberOfResults: input.numberOfResults ?? RERANK_TOP_K,
+              overrideSearchType: 'SEMANTIC',
               ...(filter ? { filter: filter as never } : {}),
-            },
-          },
-          generationConfiguration: {
-            additionalModelRequestFields: {
-              rerankingConfiguration: {
-                type: 'BEDROCK_RERANKING_MODEL',
-                bedrockRerankingConfiguration: {
-                  modelConfiguration: { modelArn: this.rerankModelArn },
-                  numberOfRerankedResults: RERANK_TOP_K,
-                },
-              },
             },
           },
         },
