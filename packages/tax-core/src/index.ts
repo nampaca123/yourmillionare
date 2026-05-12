@@ -21,3 +21,10 @@ export { computePenalty } from './calculators/penalty-calculator.js';
 
 export type { HolidayCalendar } from './holiday-roller.js';
 export { rollForwardToBusinessDay, subtractBusinessDays } from './holiday-roller.js';
+
+export type {
+  CorporationProfileForBenefits,
+  BenefitEligibilityRule,
+  BenefitCandidate,
+} from './benefits/youth-founder-eligibility.js';
+export { evaluateYouthFounderBenefit, estimateAnnualSavings } from './benefits/youth-founder-eligibility.js';

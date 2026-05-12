@@ -10,6 +10,7 @@ const FETCH_TIMEOUT_MS = 10_000;
 export interface OpenLawSearchInput {
   readonly target: OpenLawTarget;
   readonly query?: string;
+  readonly search?: 1 | 2;
   readonly display?: number;
   readonly page?: number;
   readonly efYd?: string;
@@ -46,8 +47,9 @@ export class OpenLawClient {
       OC: this.oc,
       target: input.target,
       type: 'JSON',
+      search: String(input.search ?? 1),
+      display: String(input.display ?? 20),
       ...(input.query ? { query: input.query } : {}),
-      ...(input.display ? { display: String(input.display) } : {}),
       ...(input.page ? { page: String(input.page) } : {}),
       ...(input.efYd ? { efYd: input.efYd } : {}),
       ...(input.extra ?? {}),
