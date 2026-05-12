@@ -3,6 +3,9 @@ export * from './domain/journal-line.value-object.js';
 export * from './domain/journal.errors.js';
 export * from './domain/seed-accounts.js';
 
+export type { HeuristicRule, HeuristicMatch, HeuristicInput } from './domain/heuristics/counterparty-rules.js';
+export { COUNTERPARTY_RULES, matchHeuristic } from './domain/heuristics/counterparty-rules.js';
+
 export type {
   ClassifyInput,
   ClassifyResult,

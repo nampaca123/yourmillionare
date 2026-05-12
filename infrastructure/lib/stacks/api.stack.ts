@@ -34,12 +34,20 @@ export interface ApiStackProps extends StackProps {
   readonly identity: IdentityStack;
   readonly sharedKey: IKey;
   readonly codefSecret: ISecret;
+  readonly manualSyncStateMachineArn?: string;
+  readonly legalSyncStateMachineArn?: string;
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const IDENTITY_LAMBDA_ENTRY = join(__dirname, '../../../apps/identity/src/infrastructure/inbound/http/identity.lambda.ts');
 const JOURNAL_LAMBDA_ENTRY = join(__dirname, '../../../apps/journal/src/infrastructure/inbound/http/journal.lambda.ts');
+const FX_LAMBDA_ENTRY = join(__dirname, '../../../apps/fx/src/infrastructure/inbound/http/fx.lambda.ts');
+const TAX_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax/src/infrastructure/inbound/http/tax.lambda.ts');
+const TAX_KNOWLEDGE_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax-knowledge/src/infrastructure/inbound/http/tax-knowledge.lambda.ts');
 const BEDROCK_PROFILE_ID = 'global.anthropic.claude-sonnet-4-6';
+const RERANK_REGION_DEFAULT = 'ap-northeast-1';
+const RERANK_MODEL_DEFAULT = 'cohere.rerank-v3-5:0';
+const EMBED_MODEL_DEFAULT = 'cohere.embed-multilingual-v3';
 
 export class ApiStack extends Stack {
   public readonly httpApi: HttpApi;
@@ -137,6 +145,7 @@ export class ApiStack extends Stack {
         COST_COUNTER_TABLE_NAME: props.cache.costCounter.tableName,
         IDEMPOTENCY_TABLE_NAME: props.cache.idempotencyKeys.tableName,
         TRANSACTION_CACHE_TABLE_NAME: props.cache.transactionCache.tableName,
+        MANUAL_SYNC_STATE_MACHINE_ARN: props.manualSyncStateMachineArn ?? '',
       },
       bundling: {
         externalModules: ['@aws-sdk/*', 'pg-native'],
@@ -161,9 +170,143 @@ export class ApiStack extends Stack {
         ],
       }),
     );
+    journalFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['states:StartExecution', 'states:DescribeExecution'],
+        resources: [`arn:aws:states:${region}:${account}:stateMachine:*`],
+      }),
+    );
     props.cache.costCounter.grantReadWriteData(journalFn);
     props.cache.idempotencyKeys.grantReadWriteData(journalFn);
     props.cache.transactionCache.grantReadWriteData(journalFn);
+
+    // --- FX Lambda (HTTP) ---
+    const fxFn = new NodejsFunction(this, 'FxFn', {
+      entry: FX_LAMBDA_ENTRY,
+      handler: 'handler',
+      runtime: Runtime.NODEJS_20_X,
+      architecture: Architecture.ARM_64,
+      memorySize: 256,
+      timeout: Duration.seconds(15),
+      vpc: props.vpc,
+      vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [props.lambdaSg],
+      environment: {
+        CLUSTER_ENDPOINT: props.aurora.cluster.clusterEndpoint.hostname,
+        CLUSTER_PORT: '5432',
+        DATABASE_NAME: 'yourmillionare',
+        APP_REGION: region,
+        LOG_LEVEL: isProd ? 'info' : 'debug',
+        ECOS_API_KEY: process.env.ECOS_API_KEY ?? '',
+      },
+      bundling: {
+        externalModules: ['@aws-sdk/*', 'pg-native'],
+        nodeModules: ['pg'],
+      },
+    });
+    fxFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['rds-db:connect'],
+        resources: [`arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`],
+      }),
+    );
+
+    // --- Tax Lambda (HTTP) ---
+    const taxFn = new NodejsFunction(this, 'TaxFn', {
+      entry: TAX_LAMBDA_ENTRY,
+      handler: 'handler',
+      runtime: Runtime.NODEJS_20_X,
+      architecture: Architecture.ARM_64,
+      memorySize: 384,
+      timeout: Duration.seconds(20),
+      vpc: props.vpc,
+      vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [props.lambdaSg],
+      environment: {
+        CLUSTER_ENDPOINT: props.aurora.cluster.clusterEndpoint.hostname,
+        CLUSTER_PORT: '5432',
+        DATABASE_NAME: 'yourmillionare',
+        APP_REGION: region,
+        LOG_LEVEL: isProd ? 'info' : 'debug',
+        HOLIDAY_API_SERVICE_KEY: process.env.HOLIDAY_API_SERVICE_KEY ?? '',
+      },
+      bundling: {
+        externalModules: ['@aws-sdk/*', 'pg-native'],
+        nodeModules: ['pg', '@aws-lambda-powertools/idempotency'],
+      },
+    });
+    taxFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['rds-db:connect'],
+        resources: [`arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`],
+      }),
+    );
+
+    // --- Tax-Knowledge Lambda (Bedrock KB + AgentCore-style tools + admin) ---
+    const kbRegion = process.env.BEDROCK_KB_REGION ?? region;
+    const rerankRegion = process.env.BEDROCK_RERANK_REGION ?? RERANK_REGION_DEFAULT;
+    const rerankModel = process.env.BEDROCK_RERANK_MODEL ?? RERANK_MODEL_DEFAULT;
+    const embedModel = process.env.BEDROCK_EMBED_MODEL ?? EMBED_MODEL_DEFAULT;
+
+    const taxKnowledgeFn = new NodejsFunction(this, 'TaxKnowledgeFn', {
+      entry: TAX_KNOWLEDGE_LAMBDA_ENTRY,
+      handler: 'handler',
+      runtime: Runtime.NODEJS_20_X,
+      architecture: Architecture.ARM_64,
+      memorySize: 512,
+      timeout: Duration.seconds(30),
+      vpc: props.vpc,
+      vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [props.lambdaSg],
+      environment: {
+        CLUSTER_ENDPOINT: props.aurora.cluster.clusterEndpoint.hostname,
+        CLUSTER_PORT: '5432',
+        DATABASE_NAME: 'yourmillionare',
+        APP_REGION: region,
+        LOG_LEVEL: isProd ? 'info' : 'debug',
+        BEDROCK_KB_ID: process.env.BEDROCK_KB_ID ?? '',
+        BEDROCK_KB_REGION: kbRegion,
+        BEDROCK_RERANK_REGION: rerankRegion,
+        BEDROCK_RERANK_MODEL: rerankModel,
+        BEDROCK_EMBED_MODEL: embedModel,
+        BEDROCK_MODEL_ID: BEDROCK_PROFILE_ID,
+        ADMIN_COGNITO_GROUP: process.env.ADMIN_COGNITO_GROUP ?? 'ym-tax-admin',
+        RERANK_DAILY_LIMIT_PER_USER: process.env.RERANK_DAILY_LIMIT_PER_USER ?? '20',
+        LEGAL_SYNC_STATE_MACHINE_ARN: props.legalSyncStateMachineArn ?? process.env.LEGAL_SYNC_STATE_MACHINE_ARN ?? '',
+      },
+      bundling: {
+        externalModules: ['@aws-sdk/*', 'pg-native'],
+        nodeModules: ['pg'],
+      },
+    });
+    taxKnowledgeFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['rds-db:connect'],
+        resources: [`arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`],
+      }),
+    );
+    taxKnowledgeFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['bedrock:Retrieve', 'bedrock:RetrieveAndGenerate', 'bedrock:Rerank'],
+        resources: ['*'],
+      }),
+    );
+    taxKnowledgeFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['bedrock:InvokeModel'],
+        resources: [
+          `arn:aws:bedrock:${kbRegion}::foundation-model/${embedModel}`,
+          `arn:aws:bedrock:${rerankRegion}::foundation-model/${rerankModel}`,
+          `arn:aws:bedrock:${region}:${account}:inference-profile/${BEDROCK_PROFILE_ID}`,
+        ],
+      }),
+    );
+    taxKnowledgeFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['states:StartExecution'],
+        resources: [`arn:aws:states:${region}:${account}:stateMachine:*`],
+      }),
+    );
 
     // --- HTTP API ---
     const jwtAuthorizer = new HttpJwtAuthorizer('JwtAuthorizer', props.identity.issuerUrl, {
@@ -183,6 +326,7 @@ export class ApiStack extends Stack {
         allowMethods: [
           CorsHttpMethod.GET,
           CorsHttpMethod.POST,
+          CorsHttpMethod.PATCH,
           CorsHttpMethod.OPTIONS,
         ],
         allowHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key'],
@@ -211,12 +355,22 @@ export class ApiStack extends Stack {
 
     const identityIntegration = new HttpLambdaIntegration('IdentityIntegration', identityFn);
     const journalIntegration = new HttpLambdaIntegration('JournalIntegration', journalFn);
+    const fxIntegration = new HttpLambdaIntegration('FxIntegration', fxFn);
+    const taxIntegration = new HttpLambdaIntegration('TaxIntegration', taxFn);
+    const taxKnowledgeIntegration = new HttpLambdaIntegration('TaxKnowledgeIntegration', taxKnowledgeFn);
 
     // GET /health — no authorizer (intentional liveness probe)
     this.httpApi.addRoutes({
       path: '/health',
       methods: [HttpMethod.GET],
       integration: identityIntegration,
+    });
+
+    // GET /accounts/chart — global K-IFRS chart, unauthenticated, static
+    this.httpApi.addRoutes({
+      path: '/accounts/chart',
+      methods: [HttpMethod.GET],
+      integration: journalIntegration,
     });
 
     // Identity authenticated routes
@@ -235,16 +389,80 @@ export class ApiStack extends Stack {
       });
     }
 
-    // Journal authenticated routes (path-scoped per tenant)
+    // Journal authenticated routes (path-scoped per tenant) — original 3 + 12 new for sync, views, drafts, reports
     for (const [method, path] of [
       [HttpMethod.POST, '/tenants/{tenantId}/journal/classify'],
       [HttpMethod.POST, '/tenants/{tenantId}/journal/entries'],
       [HttpMethod.GET, '/tenants/{tenantId}/journal/entries'],
+      [HttpMethod.GET, '/tenants/{tenantId}/journal/drafts'],
+      [HttpMethod.POST, '/tenants/{tenantId}/sync'],
+      [HttpMethod.GET, '/tenants/{tenantId}/sync/status'],
+      [HttpMethod.GET, '/tenants/{tenantId}/summary/monthly'],
+      [HttpMethod.GET, '/tenants/{tenantId}/receivables'],
+      [HttpMethod.PATCH, '/tenants/{tenantId}/receivables/{entryId}'],
+      [HttpMethod.GET, '/tenants/{tenantId}/accounts/balances'],
+      [HttpMethod.GET, '/tenants/{tenantId}/reports/pnl'],
+      [HttpMethod.GET, '/tenants/{tenantId}/reports/balance-sheet'],
+      [HttpMethod.GET, '/tenants/{tenantId}/reports/cash-flow'],
+      [HttpMethod.GET, '/tenants/{tenantId}/reports/trial-balance'],
     ] as [HttpMethod, string][]) {
       this.httpApi.addRoutes({
         path,
         methods: [method],
         integration: journalIntegration,
+        authorizer: jwtAuthorizer,
+      });
+    }
+
+    // FX routes
+    for (const [method, path] of [
+      [HttpMethod.GET, '/fx/rates/usd-krw'],
+      [HttpMethod.POST, '/tenants/{tenantId}/fx/revalue'],
+    ] as [HttpMethod, string][]) {
+      this.httpApi.addRoutes({
+        path,
+        methods: [method],
+        integration: fxIntegration,
+        authorizer: jwtAuthorizer,
+      });
+    }
+
+    // Tax routes (filings + withholding + tax-invoices + corporation-profile)
+    for (const [method, path] of [
+      [HttpMethod.GET, '/tenants/{tenantId}/corporation-profile'],
+      [HttpMethod.POST, '/tenants/{tenantId}/corporation-profile'],
+      [HttpMethod.GET, '/tenants/{tenantId}/filings/upcoming'],
+      [HttpMethod.GET, '/tenants/{tenantId}/filings/{id}/draft'],
+      [HttpMethod.GET, '/tenants/{tenantId}/filings/{id}/penalty-simulation'],
+      [HttpMethod.POST, '/tenants/{tenantId}/filings/{id}/recompute'],
+      [HttpMethod.GET, '/tenants/{tenantId}/withholding/pending'],
+      [HttpMethod.POST, '/tenants/{tenantId}/withholding/{id}/file'],
+      [HttpMethod.GET, '/tenants/{tenantId}/tax-invoices'],
+    ] as [HttpMethod, string][]) {
+      this.httpApi.addRoutes({
+        path,
+        methods: [method],
+        integration: taxIntegration,
+        authorizer: jwtAuthorizer,
+      });
+    }
+
+    // Tax-Knowledge routes (AgentCore-style tools + admin)
+    for (const [method, path] of [
+      [HttpMethod.POST, '/tenants/{tenantId}/agent/search-tax-law'],
+      [HttpMethod.POST, '/tenants/{tenantId}/agent/find-benefits'],
+      [HttpMethod.GET, '/admin/tax-rules'],
+      [HttpMethod.POST, '/admin/tax-rules/{id}/approve'],
+      [HttpMethod.GET, '/admin/tax-rules/{id}/change-log'],
+      [HttpMethod.GET, '/admin/tax-law-sync/state'],
+      [HttpMethod.POST, '/admin/tax-law-sync/run'],
+      [HttpMethod.GET, '/admin/tax-rule-reviews'],
+      [HttpMethod.POST, '/admin/tax-rule-reviews/{id}/resolve'],
+    ] as [HttpMethod, string][]) {
+      this.httpApi.addRoutes({
+        path,
+        methods: [method],
+        integration: taxKnowledgeIntegration,
         authorizer: jwtAuthorizer,
       });
     }
@@ -314,10 +532,11 @@ export class ApiStack extends Stack {
         },
         {
           id: 'AwsSolutions-IAM5',
-          reason: 'rds-db:connect scoped to app_user; bedrock foundation-model wildcard required for cross-region inference profile',
+          reason: 'rds-db:connect scoped to app_user; bedrock foundation-model wildcard required for cross-region inference profile; states wildcard for ManualSyncStateMachine deployed in a separate stack',
           appliesTo: [
             'Resource::*',
             'Resource::arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6',
+            `Resource::arn:aws:states:${region}:${account}:stateMachine:*`,
           ],
         },
         {
@@ -328,6 +547,32 @@ export class ApiStack extends Stack {
       ],
       true,
     );
+
+    for (const fn of [fxFn, taxFn, taxKnowledgeFn]) {
+      NagSuppressions.addResourceSuppressions(
+        fn,
+        [
+          { id: 'AwsSolutions-L1', reason: 'NODEJS_20_X is current LTS; 22_X adoption deferred' },
+          {
+            id: 'AwsSolutions-IAM4',
+            reason: 'AWSLambdaVPCAccessExecutionRole + AWSLambdaBasicExecutionRole required for VPC Lambda',
+            appliesTo: [
+              'Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole',
+              'Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole',
+            ],
+          },
+          {
+            id: 'AwsSolutions-IAM5',
+            reason: 'rds-db:connect scoped to app_user; Bedrock Retrieve/Rerank/states wildcards required for cross-region + dynamic KB IDs',
+            appliesTo: [
+              'Resource::*',
+              `Resource::arn:aws:states:${region}:${account}:stateMachine:*`,
+            ],
+          },
+        ],
+        true,
+      );
+    }
 
     NagSuppressions.addStackSuppressions(this, [
       {

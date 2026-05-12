@@ -1,15 +1,31 @@
 # 슬라이스 진행 현황
 
-## 스택별 상태 (Slice 5 이후)
+## 스택별 상태 (Slice 7 통합 보완 진행 중)
 
 | 스택 | 상태 | 비고 |
 |------|------|------|
-| `Ym-Dev-Foundation` | ✅ DEPLOYED | KMS CMK, **CODEF + ECOS** Secrets 슬롯 (CMK는 AWS-managed로 정리됨) |
+| `Ym-Dev-Foundation` | ✅ DEPLOYED | KMS CMK, **CODEF + ECOS** Secrets 슬롯 |
 | `Ym-Dev-Network` | ✅ DEPLOYED | VPC, SG, VPC Endpoints, NAT Instance, PRIVATE_WITH_EGRESS |
-| `Ym-Dev-Data` | ✅ DEPLOYED | Aurora + schema + migrations (**0006–0010**) + DynamoDB + verifier (13 tables) |
-| `Ym-Dev-Identity` | ✅ DEPLOYED | Cognito User Pool + Client + **Hosted UI domain + Google IdP** |
-| `Ym-Dev-Api` | ✅ DEPLOYED | HTTP API + Identity (PRIVATE_WITH_EGRESS) / Journal Lambda + 신규 routes 2개 |
-| `Ym-Dev-Ingestion` | ✅ DEPLOYED | CODEF EDA **실연동 가동** (SFN→fetch→SQS→Bedrock classify→Aurora) |
+| `Ym-Dev-Data` | ✅ DEPLOYED (Slice 7) | Aurora + 마이그레이션 **0006–0015** + 28 tables + 42 RLS 정책 + verifier 갱신 + journal_entry_draft + tax_rule + tax_law_chunk_meta + holiday_cache + filing_obligation + withholding_payment + tax_invoice + penalty_calculation + notification_event |
+| `Ym-Dev-Identity` | ✅ DEPLOYED | Cognito User Pool + Client + Hosted UI + Google IdP |
+| `Ym-Dev-Api` | ✅ DEPLOYED (Slice 7) | HTTP API + Identity / Journal / **신규: Fx / Tax / TaxKnowledge** Lambda — 라우트 9 → **28** (live 검증 16/19 신규 PASS) |
+| `Ym-Dev-Ingestion` | ✅ DEPLOYED (Slice 7) | CODEF EDA 그대로 + **신규: ManualSyncStateMachine + LegalSyncStateMachine (stub) + LegalSyncScheduleRule (월 1회 KST 03:00)** |
+
+## Slice 7 라이브 검증 결과 (2026-05-12 dev)
+
+19개 신규 endpoint 라이브 검증 — `docs/api-review-260512.ndjson` 참조.
+
+| 카테고리 | endpoint 수 | 검증 결과 |
+|---|---|---|
+| Foundations | 1 (`GET /accounts/chart`) | ✅ 49 K-IFRS 계정 반환 |
+| Sync (G1, G2) | 2 (`POST /sync`, `GET /sync/status`) | ✅ 라이브 데이터 (undispatched/dispatched/classified) |
+| Core views (G3, G6, G7) | 4 (summary/monthly, receivables GET/PATCH, accounts/balances) | ✅ 실 분개로 잔액 계산 (보통예금 -595,329 KRW) |
+| Drafts (G4) | 1 (`GET /journal/drafts`) | ✅ (휴리스틱 step ingestion에 추가 필요 — Wave-5) |
+| Reports (G5) | 4 (P&L / BS / CF / TB) | ✅ 회계 항등식 통과 |
+| FX (G8) | 2 (rates / revalue) | 🔄 ECOS_API_KEY 환경변수 주입 deploy 진행 중 |
+| Tax (G9) | 8 (filings + withholding + tax-invoices + corporation-profile) | ✅ 정상 (corporation-profile RLS 수정 적용 중) |
+| Agent (G9) | 2 (search-tax-law / find-benefits) | search-tax-law: 503 (Wave-5 KB 미설정), find-benefits: ✅ stub 응답 |
+| Admin (G9) | 7 (tax-rules / approve / change-log / sync-state / sync-run / reviews / resolve) | ✅ 403 강제 (ym-tax-admin group 필수) |
 
 ---
 

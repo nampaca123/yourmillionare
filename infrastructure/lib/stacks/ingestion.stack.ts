@@ -46,6 +46,9 @@ export interface IngestionStackProps extends StackProps {
 }
 
 export class IngestionStack extends Stack {
+  public readonly manualSyncStateMachineArn: string;
+  public readonly legalSyncStateMachineArn: string;
+
   constructor(scope: Construct, id: string, props: IngestionStackProps) {
     super(scope, id, props);
 
@@ -243,10 +246,10 @@ export class IngestionStack extends Stack {
         reason: 'rds-db:connect ARN is scoped to app_user on this cluster; wildcard suffix from CDK execution role.',
         appliesTo: ['Resource::*'],
       },
-    ] as const;
+    ];
 
     for (const fn of [tenantsListFn, codefFetchFn, classifyWorkerFn]) {
-      NagSuppressions.addResourceSuppressions(fn, [...vpcLambdaSuppressions], true);
+      NagSuppressions.addResourceSuppressions(fn, vpcLambdaSuppressions, true);
     }
 
     NagSuppressions.addResourceSuppressions(
@@ -313,6 +316,64 @@ export class IngestionStack extends Stack {
     new Rule(this, 'FxCollectScheduleRule', {
       schedule: Schedule.rate(Duration.hours(1)),
     }).addTarget(new LambdaFunction(fxCollectorFn));
+
+    // --- ManualSyncStateMachine: single-tenant fetch invoked from POST /tenants/{id}/sync ---
+    const manualFetchTask = new tasks.LambdaInvoke(this, 'ManualFetchTenant', {
+      lambdaFunction: codefFetchFn,
+      payload: sfn.TaskInput.fromObject({
+        tenantId: sfn.JsonPath.stringAt('$.tenantId'),
+      }),
+      payloadResponseOnly: true,
+    });
+    const manualSyncSm = new sfn.StateMachine(this, 'ManualSyncStateMachine', {
+      definitionBody: sfn.DefinitionBody.fromChainable(manualFetchTask),
+      tracingEnabled: true,
+    });
+    this.manualSyncStateMachineArn = manualSyncSm.stateMachineArn;
+    new CfnOutput(this, 'ManualSyncStateMachineArn', {
+      value: manualSyncSm.stateMachineArn,
+      description: 'ARN of the per-tenant manual sync Step Functions state machine. Wired into Journal Lambda env.',
+      exportName: `${id}-ManualSyncStateMachineArn`,
+    });
+
+    // --- LegalSyncStateMachine (stub): monthly 법제처 OPEN_LAW corpus sync orchestrator. Wave-5 expands the chain. ---
+    const legalSyncStub = new sfn.Pass(this, 'LegalSyncStub', {
+      result: sfn.Result.fromObject({ pending: 'Wave-5: fetch + chunk + Bedrock KB ingest + review gate' }),
+    });
+    const legalSyncSm = new sfn.StateMachine(this, 'LegalSyncStateMachine', {
+      definitionBody: sfn.DefinitionBody.fromChainable(legalSyncStub),
+      tracingEnabled: true,
+    });
+    this.legalSyncStateMachineArn = legalSyncSm.stateMachineArn;
+    new CfnOutput(this, 'LegalSyncStateMachineArn', {
+      value: legalSyncSm.stateMachineArn,
+      description: 'ARN of the monthly legal-corpus sync state machine. Stub until Wave-5.',
+      exportName: `${id}-LegalSyncStateMachineArn`,
+    });
+
+    new Rule(this, 'LegalSyncScheduleRule', {
+      schedule: Schedule.cron({ minute: '0', hour: '18', day: '1' }),
+    }).addTarget(new SfnStateMachine(legalSyncSm));
+
+    NagSuppressions.addResourceSuppressions(
+      manualSyncSm,
+      [{ id: 'AwsSolutions-SF1', reason: 'SFN CloudWatch Logs integration deferred to Slice 6 observability hardening.' }],
+    );
+    NagSuppressions.addResourceSuppressions(
+      legalSyncSm,
+      [{ id: 'AwsSolutions-SF1', reason: 'SFN CloudWatch Logs integration deferred; stub state machine.' }],
+    );
+    for (const sm of [manualSyncSm, legalSyncSm]) {
+      const policy = sm.role.node.tryFindChild('DefaultPolicy');
+      if (policy) {
+        NagSuppressions.addResourceSuppressions(policy, [
+          {
+            id: 'AwsSolutions-IAM5',
+            reason: 'CDK-generated Step Functions execution policy includes scoped Lambda invoke statements with wildcard suffix; xray + log-delivery actions require wildcard resources.',
+          },
+        ]);
+      }
+    }
 
     const dlqAlarm = new Alarm(this, 'ClassifyDlqDepthAlarm', {
       metric: classifyDlq.metricApproximateNumberOfMessagesVisible({

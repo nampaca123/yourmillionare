@@ -37,7 +37,7 @@ export class ConnectBankUseCase {
       organization: params.organization,
       loginId: params.loginId,
       loginPassword: params.loginPassword,
-      birthDate: params.birthDate,
+      ...(params.birthDate !== undefined ? { birthDate: params.birthDate } : {}),
     });
 
     const connection = await this.connections.upsert({

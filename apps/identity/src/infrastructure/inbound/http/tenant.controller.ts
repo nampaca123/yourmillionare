@@ -31,7 +31,7 @@ export const buildCreateTenantController =
       cognitoSub: claims.cognitoSub,
       legalName: parsed.data.legalName,
       displayName: parsed.data.displayName,
-      bizRegNoRaw: parsed.data.bizRegNo,
+      ...(parsed.data.bizRegNo !== undefined ? { bizRegNoRaw: parsed.data.bizRegNo } : {}),
     });
 
     return {
