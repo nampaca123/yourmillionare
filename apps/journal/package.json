@@ -16,6 +16,7 @@
     "@aws-lambda-powertools/idempotency": "^2.14.0",
     "@ym/journal-core": "*",
     "@ym/reports-core": "*",
+    "@ym/shared-auth": "*",
     "@ym/shared-errors": "*",
     "pg": "^8.20.0",
     "pino": "^9.0.0",

@@ -1,4 +1,4 @@
-// Controller: POST /tenants/{tenantId}/sync — triggers per-tenant ManualSyncStateMachine.
+// Controller: POST /tenants/{tenantId}/sync — creates a sync_run, triggers ManualSyncStateMachine, returns syncRunId + pollUrl.
 
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import type { EnsureUserExistsUseCase } from '../../../application/ensure-user-exists.use-case.js';
@@ -22,6 +22,12 @@ export const buildSyncStartController =
 
     return {
       statusCode: 202,
-      body: JSON.stringify(result),
+      body: JSON.stringify({
+        syncRunId: result.syncRunId,
+        status: result.status,
+        pollUrl: `/tenants/${tenantId}/fs/sync/runs/${result.syncRunId}`,
+        executionArn: result.executionArn,
+        startDate: result.startDate,
+      }),
     };
   };

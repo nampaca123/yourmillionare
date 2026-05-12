@@ -46,8 +46,11 @@ export interface JournalEntryDraft {
     credit: number;
     memo: string | null;
   }>;
+  readonly origin: 'heuristic' | 'ai_low_conf';
+  readonly aiConfidence: number | null;
   readonly heuristicConfidence: number | null;
   readonly ruleId: string | null;
+  readonly status: 'pending' | 'accepted' | 'discarded';
   readonly createdAt: string;
 }
 

@@ -42,8 +42,11 @@ interface DraftRow {
   raw_transaction_id: string;
   tenant_id: string;
   draft_lines: unknown;
+  origin: 'heuristic' | 'ai_low_conf';
   heuristic_confidence: string | null;
+  ai_confidence: string | null;
   rule_id: string | null;
+  status: 'pending' | 'accepted' | 'discarded';
   created_at: Date;
 }
 
@@ -202,9 +205,11 @@ export class PgViewsRepository implements ViewsRepository {
   async listDrafts({ tenantId }: { tenantId: string }): Promise<ReadonlyArray<JournalEntryDraft>> {
     return withRlsContext({ tenantId, cognitoSub: 'system' }, async (client) => {
       const result = await client.query<DraftRow>(
-        `SELECT raw_transaction_id, tenant_id, draft_lines, heuristic_confidence::text, rule_id, created_at
+        `SELECT raw_transaction_id, tenant_id, draft_lines, origin,
+                heuristic_confidence::text, ai_confidence::text,
+                rule_id, status, created_at
            FROM journal_entry_draft
-          WHERE tenant_id = $1
+          WHERE tenant_id = $1 AND status = 'pending'
        ORDER BY created_at DESC
           LIMIT 200`,
         [tenantId],
@@ -213,8 +218,11 @@ export class PgViewsRepository implements ViewsRepository {
         rawTransactionId: row.raw_transaction_id,
         tenantId: row.tenant_id,
         draftLines: row.draft_lines as JournalEntryDraft['draftLines'],
+        origin: row.origin,
+        aiConfidence: row.ai_confidence ? Number.parseFloat(row.ai_confidence) : null,
         heuristicConfidence: row.heuristic_confidence ? Number.parseFloat(row.heuristic_confidence) : null,
         ruleId: row.rule_id,
+        status: row.status,
         createdAt: row.created_at.toISOString(),
       }));
     });

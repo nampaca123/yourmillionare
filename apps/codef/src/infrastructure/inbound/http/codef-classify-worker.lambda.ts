@@ -102,12 +102,14 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
         if (classifyResult.confidence < DRAFT_CONFIDENCE_THRESHOLD) {
           await client.query(
             `INSERT INTO journal_entry_draft
-               (raw_transaction_id, tenant_id, draft_lines, heuristic_confidence, rule_id)
-             VALUES ($1, $2, $3::jsonb, $4, $5)
+               (raw_transaction_id, tenant_id, draft_lines, ai_confidence, rule_id, origin, status)
+             VALUES ($1, $2, $3::jsonb, $4, $5, 'ai_low_conf', 'pending')
              ON CONFLICT (raw_transaction_id) DO UPDATE
                SET draft_lines = EXCLUDED.draft_lines,
-                   heuristic_confidence = EXCLUDED.heuristic_confidence,
-                   rule_id = EXCLUDED.rule_id`,
+                   ai_confidence = EXCLUDED.ai_confidence,
+                   rule_id = EXCLUDED.rule_id,
+                   origin = 'ai_low_conf',
+                   status = 'pending'`,
             [
               rawTransactionId,
               tenantId,
