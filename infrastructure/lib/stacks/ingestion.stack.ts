@@ -12,6 +12,7 @@ import { SubnetType } from 'aws-cdk-lib/aws-ec2';
 import { Rule, Schedule } from 'aws-cdk-lib/aws-events';
 import { LambdaFunction, SfnStateMachine } from 'aws-cdk-lib/aws-events-targets';
 import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
+import { BlockPublicAccess, Bucket, BucketEncryption } from 'aws-cdk-lib/aws-s3';
 import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -33,6 +34,8 @@ const TENANTS_LIST_ENTRY = join(__dirname, '../../../apps/codef/src/infrastructu
 const CODEF_FETCH_ENTRY = join(__dirname, '../../../apps/codef/src/infrastructure/inbound/http/codef-fetch.lambda.ts');
 const CLASSIFY_WORKER_ENTRY = join(__dirname, '../../../apps/codef/src/infrastructure/inbound/http/codef-classify-worker.lambda.ts');
 const FX_COLLECTOR_ENTRY = join(__dirname, '../../../apps/fx/src/infrastructure/inbound/fx-collector.lambda.ts');
+const HOLIDAY_SYNC_ENTRY = join(__dirname, '../../../apps/tax/src/infrastructure/inbound/scheduled/holiday-yearly-sync.lambda.ts');
+const LAW_SYNC_ENTRY = join(__dirname, '../../../apps/tax-knowledge/src/infrastructure/inbound/scheduled/monthly-law-sync.lambda.ts');
 
 const BEDROCK_PROFILE_ID = 'global.anthropic.claude-sonnet-4-6';
 
@@ -192,6 +195,50 @@ export class IngestionStack extends Stack {
       bundling: { externalModules: ['@aws-sdk/*'] },
     });
 
+    // --- Legal KB S3 bucket: stores raw OPEN_LAW responses + Bedrock KB chunk objects. ---
+    const legalKbBucket = new Bucket(this, 'LegalKbBucket', {
+      encryption: BucketEncryption.S3_MANAGED,
+      blockPublicAccess: BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      versioned: true,
+    });
+
+    // --- Holiday yearly sync (KASI 특일정보) ---
+    const holidaySyncFn = new NodejsFunction(this, 'HolidayYearlySyncFn', {
+      entry: HOLIDAY_SYNC_ENTRY,
+      handler: 'handler',
+      runtime: Runtime.NODEJS_20_X,
+      architecture: Architecture.ARM_64,
+      memorySize: 256,
+      timeout: Duration.seconds(60),
+      ...commonVpcConfig,
+      environment: {
+        ...commonEnv,
+        HOLIDAY_API_SERVICE_KEY: process.env.HOLIDAY_API_SERVICE_KEY ?? '',
+      },
+      bundling: commonBundling,
+    });
+    holidaySyncFn.addToRolePolicy(rdsConnectPolicy);
+
+    // --- Monthly OPEN_LAW corpus sync — fetches latest revisions + uploads raw to LegalKbBucket ---
+    const lawSyncFn = new NodejsFunction(this, 'MonthlyLawSyncFn', {
+      entry: LAW_SYNC_ENTRY,
+      handler: 'handler',
+      runtime: Runtime.NODEJS_20_X,
+      architecture: Architecture.ARM_64,
+      memorySize: 512,
+      timeout: Duration.minutes(5),
+      ...commonVpcConfig,
+      environment: {
+        ...commonEnv,
+        OPEN_LAW_OC: process.env.OPEN_LAW_OC ?? '',
+        LEGAL_KB_BUCKET: legalKbBucket.bucketName,
+      },
+      bundling: commonBundling,
+    });
+    lawSyncFn.addToRolePolicy(rdsConnectPolicy);
+    legalKbBucket.grantReadWrite(lawSyncFn);
+
     const listTenantsTask = new tasks.LambdaInvoke(this, 'ListTenantsTask', {
       lambdaFunction: tenantsListFn,
       payloadResponseOnly: true,
@@ -248,9 +295,26 @@ export class IngestionStack extends Stack {
       },
     ];
 
-    for (const fn of [tenantsListFn, codefFetchFn, classifyWorkerFn]) {
+    for (const fn of [tenantsListFn, codefFetchFn, classifyWorkerFn, holidaySyncFn, lawSyncFn]) {
       NagSuppressions.addResourceSuppressions(fn, vpcLambdaSuppressions, true);
     }
+    NagSuppressions.addResourceSuppressions(lawSyncFn, [
+      {
+        id: 'AwsSolutions-IAM5',
+        reason: 'CDK grantReadWrite on LegalKbBucket expands to scoped GetBucket*/GetObject*/List*/PutObject* actions on bucket ARN only.',
+        appliesTo: [
+          'Action::s3:GetBucket*',
+          'Action::s3:GetObject*',
+          'Action::s3:List*',
+          'Action::s3:Abort*',
+          'Action::s3:DeleteObject*',
+          'Resource::<LegalKbBucketB3596809.Arn>/*',
+        ],
+      },
+    ], true);
+    NagSuppressions.addResourceSuppressions(legalKbBucket, [
+      { id: 'AwsSolutions-S1', reason: 'Access logs deferred; bucket holds public 법제처 law texts (no PII).' },
+    ]);
 
     NagSuppressions.addResourceSuppressions(
       fxCollectorFn,
@@ -336,14 +400,23 @@ export class IngestionStack extends Stack {
       exportName: `${id}-ManualSyncStateMachineArn`,
     });
 
-    // --- LegalSyncStateMachine (stub): monthly 법제처 OPEN_LAW corpus sync orchestrator. Wave-5 expands the chain. ---
-    const legalSyncStub = new sfn.Pass(this, 'LegalSyncStub', {
-      result: sfn.Result.fromObject({ pending: 'Wave-5: fetch + chunk + Bedrock KB ingest + review gate' }),
+    // --- LegalSyncStateMachine: monthly 법제처 OPEN_LAW corpus sync orchestrator ---
+    const lawSyncTask = new tasks.LambdaInvoke(this, 'MonthlyLawSyncInvoke', {
+      lambdaFunction: lawSyncFn,
+      payloadResponseOnly: true,
     });
     const legalSyncSm = new sfn.StateMachine(this, 'LegalSyncStateMachine', {
-      definitionBody: sfn.DefinitionBody.fromChainable(legalSyncStub),
+      definitionBody: sfn.DefinitionBody.fromChainable(lawSyncTask),
       tracingEnabled: true,
     });
+
+    // --- HolidayYearlySyncRule: 매년 1월 1일 03:00 KST (UTC 18:00 Dec 31) — and an idempotent monthly top-up ---
+    new Rule(this, 'HolidayYearlySyncRule', {
+      schedule: Schedule.cron({ minute: '0', hour: '18', day: '31', month: 'DEC' }),
+    }).addTarget(new LambdaFunction(holidaySyncFn));
+    new Rule(this, 'HolidayMonthlyRefreshRule', {
+      schedule: Schedule.cron({ minute: '0', hour: '18', day: '1' }),
+    }).addTarget(new LambdaFunction(holidaySyncFn));
     this.legalSyncStateMachineArn = legalSyncSm.stateMachineArn;
     new CfnOutput(this, 'LegalSyncStateMachineArn', {
       value: legalSyncSm.stateMachineArn,

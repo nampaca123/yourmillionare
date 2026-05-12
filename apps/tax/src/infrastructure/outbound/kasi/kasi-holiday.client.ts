@@ -56,12 +56,34 @@ export class KasiHolidayClient {
   }
 
   async fetchYear(year: number): Promise<ReadonlyArray<KasiHolidayItem>> {
-    const all: KasiHolidayItem[] = [];
-    for (let month = 1; month <= 12; month += 1) {
-      const monthly = await this.fetchMonth(year, month);
-      all.push(...monthly);
+    const params = new URLSearchParams({
+      ServiceKey: this.serviceKey,
+      solYear: String(year),
+      _type: 'json',
+      numOfRows: '100',
+    });
+    const url = `${KASI_BASE_URL}?${params.toString()}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const response = await this.fetchImpl(url, { signal: controller.signal });
+      if (!response.ok) {
+        throw new BedrockUnavailableError(`KASI HTTP ${response.status}`);
+      }
+      const payload = (await response.json()) as KasiEnvelope;
+      const code = payload.response?.header?.resultCode;
+      if (code && code !== RESULT_CODE_OK) {
+        throw new BedrockUnavailableError(`KASI error ${code}: ${payload.response?.header?.resultMsg ?? ''}`);
+      }
+      return normaliseItems(payload.response?.body?.items?.item).map((raw) => ({
+        date: toIso(raw.locdate),
+        name: raw.dateName,
+        isHoliday: raw.isHoliday === 'Y',
+        isSubstitute: detectSubstitute(raw.dateName),
+      }));
+    } finally {
+      clearTimeout(timer);
     }
-    return all;
   }
 
   async fetchMonth(year: number, month: number): Promise<ReadonlyArray<KasiHolidayItem>> {
