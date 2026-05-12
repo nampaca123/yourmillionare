@@ -3,9 +3,11 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { BedrockKbClient } from './infrastructure/outbound/bedrock/bedrock-kb.client.js';
 import { PgKbStalenessReader } from './infrastructure/outbound/pg/pg-kb-staleness.reader.js';
+import { DdbBenefitsCacheAdapter } from './infrastructure/outbound/ddb/ddb-benefits-cache.adapter.js';
 import { SearchTaxLawUseCase } from './application/search-tax-law.use-case.js';
+import { FindApplicableBenefitsUseCase, type FindBenefitsResponse } from './application/find-applicable-benefits.use-case.js';
 import { buildSearchTaxLawController } from './infrastructure/inbound/http/agent-tax-law.controller.js';
-import { findBenefitsController } from './infrastructure/inbound/http/agent-find-benefits.controller.js';
+import { buildFindBenefitsController } from './infrastructure/inbound/http/agent-find-benefits.controller.js';
 import {
   adminTaxRulesController,
   adminApproveRuleController,
@@ -18,10 +20,14 @@ import {
 
 export type Handler = (event: APIGatewayProxyEventV2WithJWTAuthorizer) => Promise<APIGatewayProxyResultV2> | APIGatewayProxyResultV2;
 
-const kbClient = new BedrockKbClient();
+const kbConfigured = Boolean(process.env.BEDROCK_KB_ID);
+const kbClient = kbConfigured ? new BedrockKbClient() : null;
 const stalenessReader = new PgKbStalenessReader();
-const searchTaxLaw = new SearchTaxLawUseCase(kbClient, stalenessReader);
+const searchTaxLaw = new SearchTaxLawUseCase(kbClient ?? new BedrockKbClient(), stalenessReader);
 const searchController = buildSearchTaxLawController(searchTaxLaw);
+const benefitsCache = new DdbBenefitsCacheAdapter<FindBenefitsResponse>();
+const findBenefits = new FindApplicableBenefitsUseCase(kbClient, benefitsCache, () => stalenessReader.lastSyncedAt());
+const findBenefitsController = buildFindBenefitsController(findBenefits);
 
 export const container = {
   routes: {

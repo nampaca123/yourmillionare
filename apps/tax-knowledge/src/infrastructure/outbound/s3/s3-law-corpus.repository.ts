@@ -24,6 +24,10 @@ export class S3LawCorpusRepository {
     });
   }
 
+  bucketName(): string {
+    return this.bucket;
+  }
+
   async putRaw(input: { lawId: string; mst: string; payload: unknown }): Promise<string> {
     const key = `${RAW_PREFIX}/${input.lawId}/${input.mst}/full.json`;
     await this.client.send(
@@ -37,7 +41,7 @@ export class S3LawCorpusRepository {
     return `s3://${this.bucket}/${key}`;
   }
 
-  async putChunk(input: { lawId: string; mst: string; articleNumber: string; payload: unknown; metadata: Record<string, unknown> }): Promise<string> {
+  async putChunk(input: { lawId: string; mst: string; articleNumber: string; payload: unknown }): Promise<string> {
     const key = `${CHUNKS_PREFIX}/${input.lawId}/${input.mst}/article-${input.articleNumber}.json`;
     await this.client.send(
       new PutObjectCommand({
@@ -45,9 +49,19 @@ export class S3LawCorpusRepository {
         Key: key,
         Body: JSON.stringify(input.payload),
         ContentType: 'application/json',
-        Metadata: Object.fromEntries(
-          Object.entries(input.metadata).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]),
-        ),
+      }),
+    );
+    return `s3://${this.bucket}/${key}`;
+  }
+
+  async putChunkMetadata(input: { lawId: string; mst: string; articleNumber: string; metadata: Record<string, string> }): Promise<string> {
+    const key = `${CHUNKS_PREFIX}/${input.lawId}/${input.mst}/article-${input.articleNumber}.json.metadata.json`;
+    await this.client.send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        Body: JSON.stringify({ metadataAttributes: input.metadata }),
+        ContentType: 'application/json',
       }),
     );
     return `s3://${this.bucket}/${key}`;

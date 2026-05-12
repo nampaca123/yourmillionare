@@ -57,7 +57,7 @@ export interface LawChunk {
 }
 
 export const TARGET_LAW_REGISTRY: ReadonlyArray<TargetLawDescriptor> = [
-  { lawId: '001706', lawName: '조세특례제한법', target: 'law', lawType: 'LAW', ministry: '기획재정부' },
+  { lawId: '001584', lawName: '조세특례제한법', target: 'law', lawType: 'LAW', ministry: '기획재정부' },
   { lawId: 'VAT_LAW',     lawName: '부가가치세법', target: 'law', lawType: 'LAW', ministry: '기획재정부' },
   { lawId: 'CORP_TAX',    lawName: '법인세법', target: 'law', lawType: 'LAW', ministry: '기획재정부' },
   { lawId: 'INCOME_TAX',  lawName: '소득세법', target: 'law', lawType: 'LAW', ministry: '기획재정부' },

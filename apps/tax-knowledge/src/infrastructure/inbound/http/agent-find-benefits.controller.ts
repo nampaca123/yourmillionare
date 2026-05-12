@@ -3,6 +3,7 @@
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { z, ZodError } from 'zod';
 import { ValidationError } from '@ym/shared-errors';
+import type { FindApplicableBenefitsUseCase } from '../../../application/find-applicable-benefits.use-case.js';
 import { parseClaims } from './auth-claims.mapper.js';
 
 const BodySchema = z.object({
@@ -20,31 +21,37 @@ const BodySchema = z.object({
     .optional(),
 });
 
-const DISCLAIMER = '본 산정은 추정치이며 실제 적용은 세무사 확인이 필요합니다.';
-
-export const findBenefitsController = async (
-  event: APIGatewayProxyEventV2WithJWTAuthorizer,
-): Promise<APIGatewayProxyResultV2> => {
-  parseClaims(event.requestContext.authorizer.jwt.claims);
-  if (!event.body) throw new ValidationError('Request body is required');
-  let body: unknown;
-  try {
-    body = JSON.parse(event.body);
-  } catch {
-    throw new ValidationError('Body is not valid JSON');
-  }
-  const parsed = BodySchema.safeParse(body);
-  if (!parsed.success) throw new ZodError(parsed.error.issues);
-
-  return {
-    statusCode: 200,
-    body: JSON.stringify({
-      benefits: [],
+export const buildFindBenefitsController =
+  (useCase: FindApplicableBenefitsUseCase) =>
+  async (event: APIGatewayProxyEventV2WithJWTAuthorizer): Promise<APIGatewayProxyResultV2> => {
+    parseClaims(event.requestContext.authorizer.jwt.claims);
+    const tenantId = event.pathParameters?.tenantId ?? '';
+    if (!event.body) throw new ValidationError('Request body is required');
+    let body: unknown;
+    try {
+      body = JSON.parse(event.body);
+    } catch {
+      throw new ValidationError('Body is not valid JSON');
+    }
+    const parsed = BodySchema.safeParse(body);
+    if (!parsed.success) throw new ZodError(parsed.error.issues);
+    const profile = parsed.data.corpProfile ?? {
+      industryCode: '',
+      foundedAt: '',
+      isYouthFounder: false,
+      hqSigungu: '',
+      priorYearRevenue: 0,
+    };
+    const result = await useCase.execute({
+      tenantId,
       asOfDate: parsed.data.asOfDate,
-      totalEstimatedSavings: { amount: 0, currency: 'KRW' },
-      disclaimer: DISCLAIMER,
-      verification: { cacheHit: false, kbStale: false, lastSyncedAt: null },
-      pending: 'Wave-5: keyword extraction from corpProfile + KB retrieve (lawId=조세특례제한법) + rule-engine eligibility + Code Interpreter savings calc',
-    }),
+      profile: {
+        industryCode: profile.industryCode || null,
+        foundedAt: profile.foundedAt || null,
+        isYouthFounder: profile.isYouthFounder,
+        hqSigungu: profile.hqSigungu || null,
+        priorYearCorpTax: null,
+      },
+    });
+    return { statusCode: 200, body: JSON.stringify(result) };
   };
-};
