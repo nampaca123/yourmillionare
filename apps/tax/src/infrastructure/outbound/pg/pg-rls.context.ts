@@ -17,10 +17,6 @@ export const withRlsContext = async <T>(
   const client = await (await getPool()).connect();
   try {
     await client.query('BEGIN');
-    await client.query('RESET app.cognito_sub');
-    await client.query('RESET app.current_user_id');
-    await client.query('RESET app.current_tenant_id');
-    await client.query('RESET app.is_tax_admin');
     if (ctx.cognitoSub) await client.query("SELECT set_config('app.cognito_sub', $1, true)", [ctx.cognitoSub]);
     if (ctx.userId) await client.query("SELECT set_config('app.current_user_id', $1, true)", [ctx.userId]);
     if (ctx.tenantId) await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [ctx.tenantId]);
