@@ -276,8 +276,8 @@ calendar (1주 / 4주) 는 floor, alarm gate 가 ceiling.
 ### 6.2 dev 배포 후 E2E 회귀 검증 (PR-B2 머지 직후)
 
 ```
-1. AWS_PROFILE=yn-dev npm run synth
-2. AWS_PROFILE=yn-dev cdk deploy 'Ym-Dev-*'
+1. AWS_PROFILE=ym-dev npm run synth
+2. AWS_PROFILE=ym-dev cdk deploy 'Ym-Dev-*'
 3. ./scripts/sync-secrets-from-env.sh dev
 4. ./scripts/post-deploy-smoke.sh dev
 5. ./scripts/run-api-e2e.sh dev
@@ -351,7 +351,7 @@ dev 8번까지 통과 + §5.3 alarm-driven gate 만족 → PR-C 로 prod 동일 
 
 ## 10. 의존 / 가정 / 검증 필요 항목
 
-- `yn-dev` AWS CLI 프로파일이 로컬에 구성됨 (`AWS_PROFILE=yn-dev`).
+- `ym-dev` AWS CLI 프로파일이 로컬에 구성됨 (`AWS_PROFILE=ym-dev`).
 - `scripts/sync-secrets-from-env.sh`, `post-deploy-smoke.sh`, `run-api-e2e.sh`, `run-agents-e2e.sh`, `run-codef-e2e.sh` 가 dev 환경에 대해 정상 동작.
 - Aurora Serverless v2 의 `cluster.addProxy()` 가 CDK v2 에서 지원됨.
 - WAF v2 가 ap-northeast-2 REGIONAL scope 로 HTTP API v2 stage 에 association 가능.
