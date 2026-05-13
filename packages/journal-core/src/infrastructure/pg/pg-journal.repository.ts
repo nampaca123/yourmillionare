@@ -25,8 +25,9 @@ export class PgJournalRepository implements Pick<JournalRepository, 'existsBySou
 
       const entryResult = await client.query<{ id: string }>(
         `INSERT INTO journal_entries
-           (id, tenant_id, entry_date, posting_date, source, description, ai_confidence, ai_model, created_by, source_ref_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           (id, tenant_id, entry_date, posting_date, source, description, ai_confidence, ai_model,
+            created_by, source_ref_id, status, confidence_status, confidence, origin, sync_run_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
          ON CONFLICT (id) DO NOTHING
          RETURNING id`,
         [
@@ -40,6 +41,11 @@ export class PgJournalRepository implements Pick<JournalRepository, 'existsBySou
           entry.aiModel ?? null,
           entry.createdBy ?? null,
           entry.sourceRefId ?? null,
+          entry.entryStatus ?? 'posted',
+          entry.confidenceStatus ?? 'certain',
+          entry.confidence ?? entry.aiConfidence ?? null,
+          entry.origin ?? null,
+          entry.syncRunId ?? null,
         ],
       );
 

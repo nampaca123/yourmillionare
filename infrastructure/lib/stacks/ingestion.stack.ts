@@ -52,7 +52,6 @@ export interface IngestionStackProps extends StackProps {
 }
 
 export class IngestionStack extends Stack {
-  public readonly manualSyncStateMachineArn: string;
   public readonly legalSyncStateMachineArn: string;
   public readonly legalKbId: string;
   public readonly legalKbDataSourceId: string;
@@ -402,25 +401,7 @@ export class IngestionStack extends Stack {
       schedule: Schedule.rate(Duration.hours(1)),
     }).addTarget(new LambdaFunction(fxCollectorFn));
 
-    // --- ManualSyncStateMachine: single-tenant fetch invoked from POST /tenants/{id}/sync ---
-    const manualFetchTask = new tasks.LambdaInvoke(this, 'ManualFetchTenant', {
-      lambdaFunction: codefFetchFn,
-      payload: sfn.TaskInput.fromObject({
-        tenantId: sfn.JsonPath.stringAt('$.tenantId'),
-        syncRunId: sfn.JsonPath.stringAt('$.syncRunId'),
-      }),
-      payloadResponseOnly: true,
-    });
-    const manualSyncSm = new sfn.StateMachine(this, 'ManualSyncStateMachine', {
-      definitionBody: sfn.DefinitionBody.fromChainable(manualFetchTask),
-      tracingEnabled: true,
-    });
-    this.manualSyncStateMachineArn = manualSyncSm.stateMachineArn;
-    new CfnOutput(this, 'ManualSyncStateMachineArn', {
-      value: manualSyncSm.stateMachineArn,
-      description: 'ARN of the per-tenant manual sync Step Functions state machine. Wired into Journal Lambda env.',
-      exportName: `${id}-ManualSyncStateMachineArn`,
-    });
+    // Manual /fs/sync is served via the SSE Function URL (CodefSyncStreamFn in ApiStack) — no Step Functions involved.
 
     // --- Bedrock Knowledge Base over the legal corpus (S3 Vectors backend, Cohere embed-v4 in Seoul) ---
     const isProdEnv = props.deploymentEnv === 'prod';
@@ -490,14 +471,10 @@ export class IngestionStack extends Stack {
     }).addTarget(new SfnStateMachine(legalSyncSm));
 
     NagSuppressions.addResourceSuppressions(
-      manualSyncSm,
-      [{ id: 'AwsSolutions-SF1', reason: 'SFN CloudWatch Logs integration deferred to Slice 6 observability hardening.' }],
-    );
-    NagSuppressions.addResourceSuppressions(
       legalSyncSm,
       [{ id: 'AwsSolutions-SF1', reason: 'SFN CloudWatch Logs integration deferred; stub state machine.' }],
     );
-    for (const sm of [manualSyncSm, legalSyncSm]) {
+    for (const sm of [legalSyncSm]) {
       const policy = sm.role.node.tryFindChild('DefaultPolicy');
       if (policy) {
         NagSuppressions.addResourceSuppressions(policy, [

@@ -12,6 +12,7 @@ const sqsClient = new SQSClient({ region: REGION });
 export interface ClassifyTask {
   rawTransactionId: string;
   tenantId: string;
+  syncRunId: string | null;
 }
 
 export const sendTaskBatch = async (tasks: ClassifyTask[]): Promise<void> => {

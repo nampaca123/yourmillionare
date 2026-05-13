@@ -34,7 +34,6 @@ export interface ApiStackProps extends StackProps {
   readonly identity: IdentityStack;
   readonly sharedKey: IKey;
   readonly codefSecret: ISecret;
-  readonly manualSyncStateMachineArn?: string;
   readonly legalSyncStateMachineArn?: string;
   readonly legalKbId?: string;
   readonly filingGeneratorFnArn?: string;
@@ -47,6 +46,7 @@ const JOURNAL_LAMBDA_ENTRY = join(__dirname, '../../../apps/journal/src/infrastr
 const FX_LAMBDA_ENTRY = join(__dirname, '../../../apps/fx/src/infrastructure/inbound/http/fx.lambda.ts');
 const TAX_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax/src/infrastructure/inbound/http/tax.lambda.ts');
 const TAX_STRATEGY_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax/src/infrastructure/inbound/streaming/tax-strategy.lambda.ts');
+const CODEF_SYNC_STREAM_LAMBDA_ENTRY = join(__dirname, '../../../apps/codef/src/infrastructure/inbound/streaming/fs-sync-stream.lambda.ts');
 const TAX_KNOWLEDGE_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax-knowledge/src/infrastructure/inbound/http/tax-knowledge.lambda.ts');
 const BEDROCK_PROFILE_ID = 'global.anthropic.claude-sonnet-4-6';
 const RERANK_REGION_DEFAULT = 'ap-northeast-1';
@@ -159,7 +159,6 @@ export class ApiStack extends Stack {
         COST_COUNTER_TABLE_NAME: props.cache.costCounter.tableName,
         IDEMPOTENCY_TABLE_NAME: props.cache.idempotencyKeys.tableName,
         TRANSACTION_CACHE_TABLE_NAME: props.cache.transactionCache.tableName,
-        MANUAL_SYNC_STATE_MACHINE_ARN: props.manualSyncStateMachineArn ?? '',
       },
       bundling: {
         externalModules: ['@aws-sdk/*', 'pg-native'],
@@ -182,12 +181,6 @@ export class ApiStack extends Stack {
           `arn:aws:bedrock:${region}:${account}:inference-profile/${BEDROCK_PROFILE_ID}`,
           'arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6',
         ],
-      }),
-    );
-    journalFn.addToRolePolicy(
-      new PolicyStatement({
-        actions: ['states:StartExecution', 'states:DescribeExecution'],
-        resources: [`arn:aws:states:${region}:${account}:stateMachine:*`],
       }),
     );
     props.cache.costCounter.grantReadWriteData(journalFn);
@@ -333,6 +326,97 @@ export class ApiStack extends Stack {
       exportName: `${id}-TaxStrategyFnUrl`,
     });
 
+    // --- Codef-Sync SSE Lambda (Function URL with response streaming, inline CODEF fetch + Bedrock classification) ---
+    const codefSyncStreamFn = new NodejsFunction(this, 'CodefSyncStreamFn', {
+      entry: CODEF_SYNC_STREAM_LAMBDA_ENTRY,
+      handler: 'handler',
+      runtime: Runtime.NODEJS_20_X,
+      architecture: Architecture.ARM_64,
+      memorySize: 1024,
+      timeout: Duration.minutes(14),
+      vpc: props.vpc,
+      vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [props.lambdaSg],
+      environment: {
+        CLUSTER_ENDPOINT: props.aurora.cluster.clusterEndpoint.hostname,
+        CLUSTER_PORT: '5432',
+        DATABASE_NAME: 'yourmillionare',
+        APP_REGION: region,
+        LOG_LEVEL: isProd ? 'info' : 'debug',
+        COGNITO_USER_POOL_ID: props.identity.userPool.userPoolId,
+        COGNITO_USER_POOL_CLIENT_ID: props.identity.userPoolClient.userPoolClientId,
+        BEDROCK_MODEL_ID: BEDROCK_PROFILE_ID,
+        TRANSACTION_CACHE_TABLE_NAME: props.cache.transactionCache.tableName,
+        CODEF_SECRET_ARN: props.codefSecret.secretArn,
+      },
+      bundling: {
+        externalModules: ['@aws-sdk/*', 'pg-native'],
+        nodeModules: ['pg'],
+      },
+    });
+    codefSyncStreamFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['rds-db:connect'],
+        resources: [`arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`],
+      }),
+    );
+    codefSyncStreamFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['bedrock:InvokeModel', 'bedrock:Converse'],
+        resources: [
+          `arn:aws:bedrock:${region}:${account}:inference-profile/${BEDROCK_PROFILE_ID}`,
+          'arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6',
+        ],
+      }),
+    );
+    props.codefSecret.grantRead(codefSyncStreamFn);
+    props.cache.transactionCache.grantReadWriteData(codefSyncStreamFn);
+
+    const codefSyncStreamFnUrl = codefSyncStreamFn.addFunctionUrl({
+      authType: FunctionUrlAuthType.NONE,
+      invokeMode: InvokeMode.RESPONSE_STREAM,
+      cors: {
+        allowedOrigins: corsAllowedOrigins,
+        allowedMethods: [LambdaHttpMethod.POST],
+        allowedHeaders: ['authorization', 'content-type', 'idempotency-key'],
+        maxAge: Duration.hours(1),
+      },
+    });
+    new CfnOutput(this, 'CodefSyncStreamFnUrl', {
+      value: codefSyncStreamFnUrl.url,
+      description: 'Function URL for POST /tenants/{tenantId}/fs/sync SSE endpoint (Bearer JWT in Authorization header).',
+      exportName: `${id}-CodefSyncStreamFnUrl`,
+    });
+
+    NagSuppressions.addResourceSuppressions(
+      codefSyncStreamFn,
+      [
+        { id: 'AwsSolutions-L1', reason: 'NODEJS_20_X is current LTS; 22_X adoption deferred' },
+        {
+          id: 'AwsSolutions-IAM4',
+          reason: 'AWSLambdaVPCAccessExecutionRole + AWSLambdaBasicExecutionRole required for VPC Lambda',
+          appliesTo: [
+            'Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole',
+            'Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole',
+          ],
+        },
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'rds-db:connect scoped to app_user; bedrock foundation-model wildcard required for cross-region inference profile',
+          appliesTo: [
+            'Resource::*',
+            'Resource::arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6',
+          ],
+        },
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'kms:ReEncrypt*/kms:GenerateDataKey* added by CDK grantReadWriteData for DynamoDB CMK',
+          appliesTo: ['Action::kms:ReEncrypt*', 'Action::kms:GenerateDataKey*'],
+        },
+      ],
+      true,
+    );
+
     // --- Tax-Knowledge Lambda (Bedrock KB + AgentCore-style tools + admin) ---
     const kbRegion = process.env.BEDROCK_KB_REGION ?? region;
     const rerankRegion = process.env.BEDROCK_RERANK_REGION ?? RERANK_REGION_DEFAULT;
@@ -475,18 +559,14 @@ export class ApiStack extends Stack {
       });
     }
 
-    // Journal authenticated routes (path-scoped per tenant) — original 3 + 12 new for sync, views, drafts, reports
+    // Journal authenticated routes (path-scoped per tenant). POST /fs/sync moved to SSE Function URL (CodefSyncStreamFn).
     for (const [method, path] of [
       [HttpMethod.POST, '/tenants/{tenantId}/journal/classify'],
       [HttpMethod.POST, '/tenants/{tenantId}/journal/entries'],
-      [HttpMethod.GET, '/tenants/{tenantId}/journal/entries'],
-      [HttpMethod.GET, '/tenants/{tenantId}/journal/drafts'],
-      [HttpMethod.POST, '/tenants/{tenantId}/journal/drafts/{rawTransactionId}/accept'],
-      [HttpMethod.POST, '/tenants/{tenantId}/fs/sync'],
-      [HttpMethod.GET, '/tenants/{tenantId}/fs/sync/status'],
-      [HttpMethod.GET, '/tenants/{tenantId}/fs/sync/runs'],
-      [HttpMethod.GET, '/tenants/{tenantId}/fs/sync/runs/latest'],
-      [HttpMethod.GET, '/tenants/{tenantId}/fs/sync/runs/{syncRunId}'],
+      [HttpMethod.GET,  '/tenants/{tenantId}/entries'],
+      [HttpMethod.PATCH, '/tenants/{tenantId}/entries/{entryId}'],
+      [HttpMethod.POST, '/tenants/{tenantId}/entries/{entryId}/confirm'],
+      [HttpMethod.POST, '/tenants/{tenantId}/entries/{entryId}/discard'],
       [HttpMethod.GET, '/tenants/{tenantId}/summary/monthly'],
       [HttpMethod.GET, '/tenants/{tenantId}/receivables'],
       [HttpMethod.PATCH, '/tenants/{tenantId}/receivables/{entryId}'],
@@ -622,11 +702,10 @@ export class ApiStack extends Stack {
         },
         {
           id: 'AwsSolutions-IAM5',
-          reason: 'rds-db:connect scoped to app_user; bedrock foundation-model wildcard required for cross-region inference profile; states wildcard for ManualSyncStateMachine deployed in a separate stack',
+          reason: 'rds-db:connect scoped to app_user; bedrock foundation-model wildcard required for cross-region inference profile',
           appliesTo: [
             'Resource::*',
             'Resource::arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6',
-            `Resource::arn:aws:states:${region}:${account}:stateMachine:*`,
           ],
         },
         {

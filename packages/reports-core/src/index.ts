@@ -2,6 +2,7 @@
 
 export type {
   AccountBalanceRow,
+  AmountBreakdown,
   LineItem,
   SectionBlock,
   IncomeStatement,
@@ -9,6 +10,12 @@ export type {
   CashFlowStatement,
   TrialBalance,
   ReportMetadata,
+} from './types.js';
+export {
+  addBreakdown,
+  subtractBreakdown,
+  sumBreakdown,
+  zeroBreakdown,
 } from './types.js';
 
 export type { JournalLineAggregate } from './builders/trial-balance-builder.js';

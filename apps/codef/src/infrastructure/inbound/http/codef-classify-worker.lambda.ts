@@ -28,6 +28,7 @@ const cacheProjector = new DdbCacheProjectorAdapter();
 interface ClassifyTask {
   rawTransactionId: string;
   tenantId: string;
+  syncRunId: string | null;
 }
 
 export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
@@ -45,7 +46,7 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
         continue;
       }
 
-      const { rawTransactionId, tenantId } = task;
+      const { rawTransactionId, tenantId, syncRunId } = task;
 
       const pool = await getPool();
       const client = await pool.connect();
@@ -99,33 +100,9 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
           memo: counterparty,
         });
 
-        if (classifyResult.confidence < DRAFT_CONFIDENCE_THRESHOLD) {
-          await client.query(
-            `INSERT INTO journal_entry_draft
-               (raw_transaction_id, tenant_id, draft_lines, ai_confidence, rule_id, origin, status)
-             VALUES ($1, $2, $3::jsonb, $4, $5, 'ai_low_conf', 'pending')
-             ON CONFLICT (raw_transaction_id) DO UPDATE
-               SET draft_lines = EXCLUDED.draft_lines,
-                   ai_confidence = EXCLUDED.ai_confidence,
-                   rule_id = EXCLUDED.rule_id,
-                   origin = 'ai_low_conf',
-                   status = 'pending'`,
-            [
-              rawTransactionId,
-              tenantId,
-              JSON.stringify(classifyResult.lines),
-              classifyResult.confidence,
-              `bedrock:${classifyResult.modelId}`,
-            ],
-          );
-          await markDispatched(client, [rawTransactionId]);
-          await client.query('COMMIT');
-          log.info(
-            { rawTransactionId, confidence: classifyResult.confidence, threshold: DRAFT_CONFIDENCE_THRESHOLD },
-            'Low-confidence classification routed to journal_entry_draft for user review',
-          );
-          continue;
-        }
+        const isUncertain = classifyResult.confidence < DRAFT_CONFIDENCE_THRESHOLD;
+        const confidenceStatus: 'certain' | 'uncertain' = isUncertain ? 'uncertain' : 'certain';
+        const origin: 'ai' | 'ai_low_conf' = isUncertain ? 'ai_low_conf' : 'ai';
 
         const entry = createJournalEntry({
           tenantId,
@@ -137,6 +114,11 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
           aiConfidence: classifyResult.confidence,
           aiModel: classifyResult.modelId,
           description: counterparty,
+          confidenceStatus,
+          confidence: classifyResult.confidence,
+          origin,
+          ...(syncRunId ? { syncRunId } : {}),
+          entryStatus: isUncertain ? 'draft' : 'posted',
         });
 
         const randomId = crypto.randomUUID();
@@ -158,16 +140,12 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
               classifyResult.confidence,
             ],
           );
-          await client.query(
-            `DELETE FROM journal_entry_draft WHERE raw_transaction_id = $1 AND tenant_id = $2`,
-            [rawTransactionId, tenantId],
-          );
         }
 
         await markDispatched(client, [rawTransactionId]);
         await client.query('COMMIT');
 
-        if (saved) {
+        if (saved && !isUncertain) {
           try {
             await cacheProjector.projectEntry(tenantId, saved);
           } catch (cacheErr) {

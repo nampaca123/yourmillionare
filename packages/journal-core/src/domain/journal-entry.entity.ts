@@ -12,6 +12,10 @@ export type JournalSource =
   | 'fx_revaluation'
   | 'manual';
 
+export type ConfidenceStatus = 'certain' | 'uncertain' | 'discarded';
+
+export type ClassificationOrigin = 'manual' | 'heuristic' | 'ai' | 'ai_low_conf';
+
 export interface JournalEntry {
   readonly id?: string;
   readonly tenantId: string;
@@ -24,6 +28,11 @@ export interface JournalEntry {
   readonly aiModel?: string;
   readonly createdBy?: string;
   readonly sourceRefId?: string;
+  readonly confidenceStatus?: ConfidenceStatus;
+  readonly confidence?: number;
+  readonly origin?: ClassificationOrigin;
+  readonly syncRunId?: string;
+  readonly entryStatus?: 'draft' | 'posted' | 'reversed';
 }
 
 export const assertBalanced = (lines: JournalLine[]): void => {

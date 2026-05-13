@@ -1,21 +1,29 @@
-// ListEntries controller: GET /tenants/{tenantId}/journal/entries — returns entries + balance snapshot + draft transparency signal.
+// ListEntries controller: GET /tenants/{tenantId}/entries — returns all entries (certain + uncertain + discarded) with confidenceStatus on every row.
 
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { ZodError } from 'zod';
+import { ValidationError } from '@ym/shared-errors';
 import type { EnsureUserExistsUseCase } from '../../../application/ensure-user-exists.use-case.js';
 import type { ListJournalEntriesUseCase } from '../../../application/list-journal-entries.use-case.js';
-import { listAccountBalances, countPendingDrafts } from '../../outbound/pg/pg-bank-accounts.repository.js';
+import type { ConfidenceStatus } from '../../../application/ports/entries.repository.port.js';
+import { listAccountBalances, countUncertainEntries } from '../../outbound/pg/pg-bank-accounts.repository.js';
 import { parseClaims } from './auth-claims.mapper.js';
 import { ListJournalEntriesQuerySchema } from './list-entries.schema.js';
 
-const draftMessage = (count: number, tenantId: string): { count: number; message: string; reviewEndpoint: string } => ({
-  count,
-  message:
-    count === 0
-      ? 'AI 자동 분류 결과를 모두 확정했습니다. 추가 검토할 거래는 없습니다.'
-      : `AI가 분류 결과에 확신이 없는 거래 ${count}건이 있어 직접 확인이 필요합니다. 아래 reviewEndpoint에서 상세 내역과 추천 분개를 확인한 뒤 확정/수정해 주세요.`,
-  reviewEndpoint: `/tenants/${tenantId}/journal/drafts`,
-});
+const VALID_STATUSES: ReadonlySet<ConfidenceStatus | 'all'> = new Set([
+  'certain',
+  'uncertain',
+  'discarded',
+  'all',
+]);
+
+const parseConfidenceStatus = (raw: string | undefined): ConfidenceStatus | 'all' => {
+  if (raw === undefined) return 'all';
+  if (!VALID_STATUSES.has(raw as ConfidenceStatus | 'all')) {
+    throw new ValidationError(`Invalid confidenceStatus: ${raw}`);
+  }
+  return raw as ConfidenceStatus | 'all';
+};
 
 export const buildListEntriesController =
   (ensureUser: EnsureUserExistsUseCase, listEntries: ListJournalEntriesUseCase) =>
@@ -26,8 +34,9 @@ export const buildListEntriesController =
 
     const parsed = ListJournalEntriesQuerySchema.safeParse(event.queryStringParameters ?? {});
     if (!parsed.success) throw new ZodError(parsed.error.issues);
+    const confidenceStatus = parseConfidenceStatus(event.queryStringParameters?.confidenceStatus);
 
-    const [entries, accountBalances, draftCount] = await Promise.all([
+    const [entries, accountBalances, uncertainCount] = await Promise.all([
       listEntries.execute({
         tenantId,
         userId: user.id,
@@ -36,9 +45,10 @@ export const buildListEntriesController =
         toDate: parsed.data.to,
         limit: parsed.data.limit,
         offset: parsed.data.offset,
+        confidenceStatus,
       }),
       listAccountBalances(tenantId),
-      countPendingDrafts(tenantId),
+      countUncertainEntries(tenantId),
     ]);
 
     return {
@@ -46,7 +56,16 @@ export const buildListEntriesController =
       body: JSON.stringify({
         entries,
         accountBalances,
-        pendingDrafts: draftMessage(draftCount, tenantId),
+        uncertain: {
+          count: uncertainCount,
+          message:
+            uncertainCount === 0
+              ? 'AI 자동 분류 결과를 모두 확정했습니다. 검토 필요 항목 없음.'
+              : `AI가 ${uncertainCount}건을 확신 없이 분류했습니다. confidenceStatus="uncertain" 인 항목을 검토/수정/확정해 주세요.`,
+          confirmEndpoint: `/tenants/${tenantId}/entries/{entryId}/confirm`,
+          discardEndpoint: `/tenants/${tenantId}/entries/{entryId}/discard`,
+          patchEndpoint: `/tenants/${tenantId}/entries/{entryId}`,
+        },
       }),
     };
   };
