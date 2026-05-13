@@ -1,10 +1,11 @@
 // API WAF v2 WebACL: 4 AWS managed rule groups (count-mode in PR-A) + IP rate limit (block).
 
-import { Duration } from 'aws-cdk-lib';
+import { Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import { Alarm, ComparisonOperator, Metric, TreatMissingData } from 'aws-cdk-lib/aws-cloudwatch';
 import { SnsAction } from 'aws-cdk-lib/aws-cloudwatch-actions';
+import { PolicyStatement, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
+import { Key } from 'aws-cdk-lib/aws-kms';
 import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
-import type { IKey } from 'aws-cdk-lib/aws-kms';
 import type { ITopic } from 'aws-cdk-lib/aws-sns';
 import { CfnLoggingConfiguration, CfnWebACL, CfnWebACLAssociation } from 'aws-cdk-lib/aws-wafv2';
 import type { Construct } from 'constructs';
@@ -16,7 +17,6 @@ const RATE_LIMIT_5MIN = { dev: 5000, prod: 2000 } as const;
 export interface WafConstructProps {
   readonly deploymentEnv: DeploymentEnv;
   readonly stageArn: string;
-  readonly logGroupKey: IKey;
   readonly alarmTopic: ITopic;
 }
 
@@ -111,9 +111,31 @@ export class WafConstruct {
       ],
     });
 
+    // Dedicated CMK with CloudWatch Logs service principal — sharedKey lacks
+    // logs.*.amazonaws.com permission, mirroring FlowLogsKey pattern.
+    const logGroupKey = new Key(scope, `${id}LogKey`, {
+      description: `KMS key for ${id} WAF log group encryption.`,
+      enableKeyRotation: true,
+      removalPolicy: isProd ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY,
+    });
+    const region = Stack.of(scope).region;
+    const account = Stack.of(scope).account;
+    logGroupKey.addToResourcePolicy(
+      new PolicyStatement({
+        principals: [new ServicePrincipal(`logs.${region}.amazonaws.com`)],
+        actions: ['kms:Encrypt*', 'kms:Decrypt*', 'kms:ReEncrypt*', 'kms:GenerateDataKey*', 'kms:Describe*'],
+        resources: ['*'],
+        conditions: {
+          ArnLike: {
+            'kms:EncryptionContext:aws:logs:arn': `arn:aws:logs:${region}:${account}:*`,
+          },
+        },
+      }),
+    );
+
     const logGroup = new LogGroup(scope, `${id}LogGroup`, {
       logGroupName: `aws-waf-logs-yourmillionare-${props.deploymentEnv}`,
-      encryptionKey: props.logGroupKey,
+      encryptionKey: logGroupKey,
       retention: isProd ? RetentionDays.THREE_MONTHS : RetentionDays.TWO_WEEKS,
     });
     new CfnLoggingConfiguration(scope, `${id}LoggingConfig`, {

@@ -752,7 +752,6 @@ export class ApiStack extends Stack {
     new WafConstruct(this, 'Waf', {
       deploymentEnv: props.deploymentEnv,
       stageArn,
-      logGroupKey: props.sharedKey,
       alarmTopic: apiAlarmTopic,
     });
 
