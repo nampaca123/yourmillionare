@@ -119,6 +119,54 @@ else
 fi
 
 note ""
+note "== 5) FX strategy Function URL preflight =="
+FX_STRATEGY_URL="$(stack_output "${STACK_PREFIX}-Api" FxStrategyFnUrl)"
+if [[ -n "$FX_STRATEGY_URL" && "$FX_STRATEGY_URL" != "None" ]]; then
+  pf="$(curl -s -o /dev/null -w '%{http_code} %header{access-control-allow-origin}' \
+    -X OPTIONS "$FX_STRATEGY_URL" \
+    -H "Origin: $ORIGIN" -H 'Access-Control-Request-Method: POST' \
+    -H 'Access-Control-Request-Headers: authorization,content-type')"
+  if [[ "${pf%% *}" =~ ^(200|204)$ && "${pf#* }" == "$ORIGIN" ]]; then
+    green "OK: FxStrategyFn preflight passed ($pf)"
+  else
+    record_fail "FxStrategyFn preflight unexpected: $pf"
+  fi
+else
+  note "  SKIP: FxStrategyFnUrl not found"
+fi
+
+note ""
+note "== 6) Strategy SSE Function URLs return SSE error+done without a token =="
+for label_url in "TaxStrategyFn:$TAX_URL" "FxStrategyFn:$FX_STRATEGY_URL"; do
+  label="${label_url%%:*}"
+  url="${label_url#*:}"
+  if [[ -z "$url" || "$url" == "None" ]]; then continue; fi
+  body="$(curl -s -N -X POST "$url" -H 'Content-Type: application/json' \
+    -d "{\"tenantId\":\"00000000-0000-0000-0000-000000000000\",\"scenario\":\"exposure_summary\"}" \
+    --max-time 8 || true)"
+  if echo "$body" | grep -q '^data: {"type":"error"' && echo "$body" | grep -q '^data: {"type":"done"'; then
+    green "OK: $label tokenless POST emitted SSE error + done"
+  else
+    record_fail "$label tokenless POST did not emit SSE error+done. body=$(echo "$body" | head -3)"
+  fi
+done
+
+note ""
+note "== 7) Deleted /agent/search-tax-law + /agent/find-benefits return ROUTE_NOT_FOUND =="
+for path in /agent/search-tax-law /agent/find-benefits; do
+  status_body="$(curl -s -o /tmp/.deleted-route.json -w '%{http_code}' \
+    -X POST "${API_BASE%/}/tenants/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa${path}" \
+    -H 'Content-Type: application/json' -d '{}')"
+  code="$(jq -r '.error.code // empty' /tmp/.deleted-route.json 2>/dev/null)"
+  if [[ "$status_body" == "404" && "$code" == "ROUTE_NOT_FOUND" ]]; then
+    green "OK: $path → 404 ROUTE_NOT_FOUND (catch-all served)"
+  else
+    record_fail "$path expected 404 ROUTE_NOT_FOUND, got http=$status_body code=$code"
+  fi
+  rm -f /tmp/.deleted-route.json
+done
+
+note ""
 if [[ "$failures" -eq 0 ]]; then
   green "post-deploy smoke: all checks passed"
   exit 0
