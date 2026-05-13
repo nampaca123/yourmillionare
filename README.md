@@ -24,7 +24,6 @@ yourmillionare/
 │   └── tax-domain/           # Tax filing engine + Bedrock KB client
 ├── docs/                     # ARCHITECTURE.md, API_LIST.md, agent-architecture.md, slice reports
 ├── scripts/                  # sync-secrets, run-api-e2e, run-codef-e2e, run-agents-e2e, post-deploy-smoke
-├── infrastructure/lib/stacks/api/waf.construct.ts  # WAF v2 WebACL attached to HTTP API stage
 ├── infrastructure/assets/rds/ap-northeast-2-bundle.pem  # RDS regional CA bundle for TLS pinning (PR-B1)
 ├── schema.sql                # Aurora PostgreSQL DDL — single source of truth (migrations 0001–0024)
 └── CLAUDE.md                 # Engineering guidelines
@@ -142,7 +141,7 @@ POST   /tenants/{id}/fx/strategy  (SSE Function URL)   — exposure_summary / co
 
 ## Architecture
 
-전체 아키텍처(6개 CDK 스택, 데이터 흐름, 부하 분산·스케일링 평가, RDS Proxy / WAF 도입 내역)는 `docs/ARCHITECTURE.md` 에 정리되어 있다.
+전체 아키텍처(6개 CDK 스택, 데이터 흐름, 부하 분산·스케일링 평가, RDS Proxy 도입 내역)는 `docs/ARCHITECTURE.md` 에 정리되어 있다. WAF 는 HTTP API v2 호환성 문제로 미도입 — 자세한 내용 `docs/error-cases/2026-05-14-pr-a-rds-proxy-and-waf.md`.
 
 ## Agent Architecture
 
@@ -268,9 +267,8 @@ AWS 가 RDS regional CA 를 회전할 때 (보통 5년 주기) 갱신:
 | 항목 | dev (월) | prod (월) |
 |---|---|---|
 | Aurora Serverless v2 (baseline) | ~$30 | ~$60 |
-| RDS Proxy (max ACU 기준) | ~$22 | ~$44 |
+| RDS Proxy (실측 — 8 ACU floor for Serverless v2) | ~$87 | ~$87 |
 | fck-nat | ~$3.5 | ~$10.5 |
-| WAF v2 (WebACL + 5 rules + 1M req) | ~$10.6 | ~$10.6 |
 
 ## Open Items
 

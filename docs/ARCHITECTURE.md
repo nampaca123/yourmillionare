@@ -339,7 +339,7 @@ PR-A (2026-05-13) 부터 Aurora writer 앞에 RDS Proxy 가 위치한다.
 |---|---|
 | API GW Usage Plan / Throttling | 없음 — account 기본 10,000 RPS / region |
 | Per-route Throttling | 없음 |
-| WAF | 있음 (4 AWS Managed Rules Count mode + IP rate limit Block, PR-C 시점에 managed 도 Block) |
+| WAF | 없음 — AWS WAF v2 는 API Gateway HTTP API v2 association 미지원. CloudFront 도입 시점에 함께 적용 예정. 자세한 내용 [docs/error-cases/2026-05-14-pr-a-rds-proxy-and-waf.md](../error-cases/2026-05-14-pr-a-rds-proxy-and-waf.md). |
 | CloudFront | 없음 — frontend (Phase 1) 도입 시 함께 검토 |
 | API GW Caching | 없음 (HTTP API 는 캐싱 미지원, REST API 로 마이그레이션 필요) |
 | Lambda Provisioned Concurrency | 없음 — SSE 에이전트 cold start (~500ms-2s) 는 Bedrock TTFT (~1-3s) 에 가려져 큰 문제 아님 |
@@ -405,20 +405,17 @@ Browser ──ID Token── Function URL ─verifyJwt (in-Lambda)── SSE han
 - CODEF / ECOS: 외부 발급 → 자동 rotation 불가. `scripts/sync-secrets-from-env.sh` 로 운영자가 갱신.
 - AWS 키는 `~/.aws/credentials`. `.env` 에는 비-AWS 자격증명만.
 
-### 6.4 WAF 인벤토리 (PR-A 부터)
+### 6.4 WAF 미적용 — HTTP API v2 호환성
 
-| WebACL | 환경 | Scope | 룰 | 액션 |
-|---|---|---|---|---|
-| `Ym-{env}-Api-WafWebAcl` | dev/prod | REGIONAL | CRS / KnownBadInputs / AmazonIpReputation / AnonymousIp | Count (PR-A) → Block (PR-C) |
-| (위 동일) | | | IpRateLimit (dev 5000 / prod 2000 req per 5min, IP aggregate) | Block |
+PR-A 시도 중 발견: **AWS WAF v2 는 API Gateway HTTP API v2 와 association 자체가 불가능** (REST API 만 지원). 즉 현 아키텍처에서 WAF 를 HTTP API 앞에 직접 부착할 수 없다. 자세한 진단은 [docs/error-cases/2026-05-14-pr-a-rds-proxy-and-waf.md](../error-cases/2026-05-14-pr-a-rds-proxy-and-waf.md) §1.
 
-**WAF 보호 밖**: 3개 SSE Function URL (`CodefSyncStream`, `TaxStrategy`, `FxStrategy`). 잔여 공격 벡터:
+**잔여 공격 벡터** (HTTP API + SSE Function URL 모두 해당):
 
-1. 유효 Cognito ID Token abuse — 매 호출이 Lambda 10-14분 + Bedrock Opus 슬롯 1 점유, `CostCounter` 일일 한도 안에서 무제한.
-2. Connection hold — long-running 호출이 Proxy backend connection 1 + Bedrock concurrency 1 슬롯을 14분 점유, N 토큰 으로 N 배.
-3. Function URL 발견 — URL 호스트 안정, 한 번 leak 시 영구.
+1. 유효 Cognito ID Token abuse — 매 호출이 Lambda timeout (HTTP API 30s / SSE 10-14분) + Bedrock 슬롯 점유, `CostCounter` 일일 한도 안에서 무제한.
+2. Connection hold (SSE 만 해당) — long-running 호출이 Proxy backend connection 1 + Bedrock concurrency 1 슬롯을 14분 점유, N 토큰 으로 N 배.
+3. 엔드포인트 발견 — HTTP API hostname / SSE Function URL 호스트 모두 안정, 한 번 leak 시 영구.
 
-완화는 Phase 1 CloudFront 도입 시점 또는 per-IP-per-minute DDB counter 도입 시.
+**완화 계획**: CloudFront distribution 도입 시점에 그 앞에 WAF v2 association (CloudFront 는 WAF 지원). 프론트팀이 CloudFront 진행 시 함께 수행.
 
 ---
 
@@ -433,7 +430,6 @@ Browser ──ID Token── Function URL ─verifyJwt (in-Lambda)── SSE han
 | SFN execution history | X-Ray (`tracingEnabled: true`) | 90d |
 | Bedrock 비용/호출 | `CostCounter` DDB + Lambda 구조화 로그 (pino) | TTL |
 | DLQ depth | CloudWatch alarm → SNS `IngestionAlarmTopic` | — |
-| WAF logs | CloudWatch (aws-waf-logs-yourmillionare-{env}) | prod 90d / dev 14d |
 | RDS Proxy metrics | CloudWatch (ConnectionBorrowLatency, DatabaseConnections, ClientConnectionsBorrowingFromProxy) + Alarms → SNS DataAlarmTopic | — |
 
 전체 Lambda 는 `pino` 구조화 로거를 사용 — `console.*` 금지 ([CLAUDE.md](../CLAUDE.md) 의 절대 금지 항목).
@@ -468,7 +464,7 @@ Browser ──ID Token── Function URL ─verifyJwt (in-Lambda)── SSE han
 | CODEF 인증 방식 | loginType=1 (ID/PW) — 5회 잠금 위험 | Phase 1 → loginType=0 (cert) 또는 5 (간편) |
 | CDK Pipelines 없음 | 로컬 cdk deploy만; CI 는 synth 만 | Phase 1 |
 | Domain / Route53 미설정 | Function URL / API GW execute-api 도메인 노출 | Public endpoint 이전 |
-| SSE Function URL WAF 미적용 | CodefSync / Tax / Fx Strategy 가 in-Lambda verifyJwt + CostCounter 만으로 보호. 잔여 공격 벡터는 §6.4 enumerate | Phase 1 CloudFront |
+| WAF 미적용 (HTTP API + SSE) | AWS WAF v2 가 HTTP API v2 와 association 불가. HTTP API / SSE Function URL 모두 in-Lambda verifyJwt + CostCounter 만으로 보호. 잔여 공격 벡터는 §6.4 enumerate | CloudFront 도입 시 (Phase 1) |
 | Aurora Reader 없음 | Read 부하가 writer 와 같이 burst | RDS Proxy 와 동시 검토 |
 | API GW per-route throttling | 한 사용자 burst 가 다른 사용자에 영향 | Phase 1 |
 

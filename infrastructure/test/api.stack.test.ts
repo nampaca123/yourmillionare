@@ -172,20 +172,6 @@ describe('ApiStack (dev)', () => {
     }
   });
 
-  it('should attach WAF WebACL to HTTP API with 4 managed rules and IP rate limit', () => {
-    template.hasResourceProperties('AWS::WAFv2::WebACL', {
-      Scope: 'REGIONAL',
-      DefaultAction: { Allow: {} },
-      Rules: Match.arrayWith([
-        Match.objectLike({ Name: 'AWS-Managed-Common' }),
-        Match.objectLike({ Name: 'AWS-Managed-KnownBadInputs' }),
-        Match.objectLike({ Name: 'AWS-Managed-AmazonIpReputation' }),
-        Match.objectLike({ Name: 'AWS-Managed-AnonymousIp' }),
-        Match.objectLike({ Name: 'IpRateLimit' }),
-      ]),
-    });
-    template.resourceCountIs('AWS::WAFv2::WebACLAssociation', 1);
-  });
 });
 
 describe('ApiStack (prod)', () => {

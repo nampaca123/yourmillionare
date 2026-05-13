@@ -15,8 +15,6 @@ import { Key, KeySpec, KeyUsage } from 'aws-cdk-lib/aws-kms';
 import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
 import { Architecture, FunctionUrlAuthType, InvokeMode, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { buildApiGwCors, buildFunctionUrlCors } from '../config/cors.config.js';
-import { Topic } from 'aws-cdk-lib/aws-sns';
-import { WafConstruct } from './api/waf.construct.js';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
 import type { ISecret } from 'aws-cdk-lib/aws-secretsmanager';
@@ -740,21 +738,6 @@ export class ApiStack extends Stack {
       path: '/',
       methods: CATCH_ALL_METHODS,
       integration: notFoundIntegration,
-    });
-
-    // --- WAF ---
-    const apiAlarmTopic = new Topic(this, 'ApiAlarmTopic', {
-      topicName: `${this.stackName}-ApiAlarmTopic`,
-      masterKey: props.sharedKey,
-    });
-
-    // HTTP API v2 default stage name is literally "$default"; WAF v2 RESOURCE_ARN
-    // rejects the unescaped "$" so URL-encode to "%24default".
-    const stageArn = `arn:aws:apigateway:${region}::/apis/${this.httpApi.apiId}/stages/%24default`;
-    new WafConstruct(this, 'Waf', {
-      deploymentEnv: props.deploymentEnv,
-      stageArn,
-      alarmTopic: apiAlarmTopic,
     });
 
     // --- Outputs ---
