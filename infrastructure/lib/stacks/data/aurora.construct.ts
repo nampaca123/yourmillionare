@@ -140,7 +140,7 @@ export class AuroraConstruct {
         },
         {
           id: 'AwsSolutions-SMG4',
-          reason: 'Master secret rotation deferred to Slice 4 when RDS Proxy is introduced.',
+          reason: 'Aurora master secret is bound to RDS Proxy (added in this slice). The 30-day HostedRotation single-user schedule remains active; Proxy reads the rotated secret transparently.',
         },
       ],
       true,
