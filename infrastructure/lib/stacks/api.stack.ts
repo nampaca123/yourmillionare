@@ -748,7 +748,9 @@ export class ApiStack extends Stack {
       masterKey: props.sharedKey,
     });
 
-    const stageArn = `arn:aws:apigateway:${region}::/apis/${this.httpApi.apiId}/stages/${this.httpApi.defaultStage!.stageName}`;
+    // HTTP API v2 default stage name is literally "$default"; WAF v2 RESOURCE_ARN
+    // rejects the unescaped "$" so URL-encode to "%24default".
+    const stageArn = `arn:aws:apigateway:${region}::/apis/${this.httpApi.apiId}/stages/%24default`;
     new WafConstruct(this, 'Waf', {
       deploymentEnv: props.deploymentEnv,
       stageArn,
