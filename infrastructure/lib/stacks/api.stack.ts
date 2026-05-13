@@ -211,6 +211,7 @@ export class ApiStack extends Stack {
         APP_REGION: region,
         LOG_LEVEL: isProd ? 'info' : 'debug',
         ECOS_CREDENTIAL_SECRET_ARN: props.ecosSecret.secretArn,
+        CODEF_SECRET_ARN: props.codefSecret.secretArn,
       },
       bundling: {
         externalModules: ['@aws-sdk/*', 'pg-native'],
@@ -224,6 +225,7 @@ export class ApiStack extends Stack {
       }),
     );
     props.ecosSecret.grantRead(fxFn);
+    props.codefSecret.grantRead(fxFn);
 
     // --- Tax Lambda (HTTP) ---
     const taxFn = new NodejsFunction(this, 'TaxFn', {

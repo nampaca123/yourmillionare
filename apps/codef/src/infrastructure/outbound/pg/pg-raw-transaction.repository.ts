@@ -1,7 +1,7 @@
-// Repository: raw_transactions upsert (with sync_run + bank_account tagging), dispatch mark, and single-row fetch.
+// Repository: raw_transactions upsert (with sync_run + bank_account tagging + optional FCY columns), dispatch mark, and single-row fetch.
 
 import type { PoolClient } from 'pg';
-import type { RawBankTransaction } from '../codef/codef.types.js';
+import type { RawBankTransaction, RawForeignTransaction } from '../codef/codef.types.js';
 
 export interface RawTransactionRow {
   id: string;
@@ -63,6 +63,64 @@ export const upsertBatch = async ({
     if (row?.inserted) {
       ids.push(row.id);
     }
+  }
+  return ids;
+};
+
+export interface ForeignUpsertTx {
+  tx: RawForeignTransaction;
+  amountKrw: number;
+  fxRate: number;
+}
+
+export interface UpsertForeignBatchInput {
+  client: PoolClient;
+  tenantId: string;
+  source: string;
+  bankAccountId: string;
+  syncRunId: string | null;
+  fcyCurrency: string;
+  rows: ReadonlyArray<ForeignUpsertTx>;
+}
+
+export const upsertForeignBatch = async ({
+  client,
+  tenantId,
+  source,
+  bankAccountId,
+  syncRunId,
+  fcyCurrency,
+  rows,
+}: UpsertForeignBatchInput): Promise<string[]> => {
+  if (rows.length === 0) return [];
+
+  const ids: string[] = [];
+  for (const { tx, amountKrw, fxRate } of rows) {
+    const result = await client.query<{ id: string; inserted: boolean }>(
+      `INSERT INTO raw_transactions
+         (tenant_id, source, external_id, occurred_at, amount, counterparty, raw_payload,
+          first_sync_run_id, bank_account_id, fcy_currency, fcy_amount, fx_rate)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       ON CONFLICT (tenant_id, source, external_id) DO UPDATE
+         SET bank_account_id = COALESCE(raw_transactions.bank_account_id, EXCLUDED.bank_account_id)
+       RETURNING id, xmax = 0 AS inserted`,
+      [
+        tenantId,
+        source,
+        tx.externalId,
+        tx.occurredAt.toISOString(),
+        amountKrw,
+        tx.counterparty ?? null,
+        JSON.stringify(tx.rawPayload),
+        syncRunId,
+        bankAccountId,
+        fcyCurrency,
+        tx.fcyAmount,
+        fxRate,
+      ],
+    );
+    const row = result.rows[0];
+    if (row?.inserted) ids.push(row.id);
   }
   return ids;
 };
