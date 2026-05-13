@@ -92,6 +92,7 @@ export class AuroraConstruct {
       assumedBy: new ServicePrincipal('rds.amazonaws.com'),
     });
     this.masterSecret.grantRead(proxyRole);
+    secretKey.grantDecrypt(proxyRole);
 
     const isolatedSubnetIds = Lazy.list({
       produce: () => props.vpc.selectSubnets({ subnetType: SubnetType.PRIVATE_ISOLATED }).subnetIds,
