@@ -1,8 +1,10 @@
 // Aurora construct: Serverless v2 cluster with Data API, IAM auth, and dev/prod branching.
 
-import { Duration, RemovalPolicy } from 'aws-cdk-lib';
+import { Duration, Lazy, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import {
   AuroraPostgresEngineVersion,
+  CfnDBProxy,
+  CfnDBProxyTargetGroup,
   ClusterInstance,
   Credentials,
   DatabaseCluster,
@@ -11,6 +13,7 @@ import {
 } from 'aws-cdk-lib/aws-rds';
 import type { ISecurityGroup, IVpc } from 'aws-cdk-lib/aws-ec2';
 import { SubnetType } from 'aws-cdk-lib/aws-ec2';
+import { Role, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
 import { Key } from 'aws-cdk-lib/aws-kms';
 import { RetentionDays } from 'aws-cdk-lib/aws-logs';
 import type { ISecret } from 'aws-cdk-lib/aws-secretsmanager';
@@ -26,11 +29,13 @@ export interface AuroraConstructProps {
   readonly deploymentEnv: DeploymentEnv;
   readonly vpc: IVpc;
   readonly auroraSg: ISecurityGroup;
+  readonly proxySg: ISecurityGroup;
 }
 
 export class AuroraConstruct {
   public readonly cluster: DatabaseCluster;
   public readonly masterSecret: ISecret;
+  public readonly proxy: CfnDBProxy;
 
   constructor(scope: Construct, id: string, props: AuroraConstructProps) {
     const isProd = props.deploymentEnv === 'prod';
@@ -78,6 +83,51 @@ export class AuroraConstruct {
     if (!this.cluster.secret) throw new Error('Aurora master secret was not created');
     this.masterSecret = this.cluster.secret;
 
+    // Use CfnDBProxy directly to avoid the L2 addProxy auto-connection rule.
+    // The L2 DatabaseProxy calls cluster.connections.allowDefaultPortFrom(proxy), which adds
+    // an ingress rule to auroraSg (NetworkStack) using the cluster port token (DataStack),
+    // creating a DependencyCycle. The NetworkStack already adds auroraSg.addIngressRule
+    // with a hardcoded port 5432, making the auto-connection redundant and harmful.
+    const proxyRole = new Role(scope, `${id}ProxyRole`, {
+      assumedBy: new ServicePrincipal('rds.amazonaws.com'),
+    });
+    this.masterSecret.grantRead(proxyRole);
+    secretKey.grantDecrypt(proxyRole);
+
+    const isolatedSubnetIds = Lazy.list({
+      produce: () => props.vpc.selectSubnets({ subnetType: SubnetType.PRIVATE_ISOLATED }).subnetIds,
+    });
+
+    this.proxy = new CfnDBProxy(scope, `${id}Proxy`, {
+      dbProxyName: `${Stack.of(scope).stackName}-aurora-proxy`,
+      engineFamily: 'POSTGRESQL',
+      requireTls: true,
+      debugLogging: false,
+      idleClientTimeout: Duration.minutes(30).toSeconds(),
+      roleArn: proxyRole.roleArn,
+      auth: [
+        {
+          authScheme: 'SECRETS',
+          iamAuth: 'REQUIRED',
+          secretArn: this.masterSecret.secretArn,
+        },
+      ],
+      vpcSecurityGroupIds: [props.proxySg.securityGroupId],
+      vpcSubnetIds: isolatedSubnetIds,
+    });
+    this.proxy.applyRemovalPolicy(isProd ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY);
+
+    const proxyTargetGroup = new CfnDBProxyTargetGroup(scope, `${id}ProxyTargetGroup`, {
+      dbProxyName: this.proxy.ref,
+      targetGroupName: 'default',
+      dbClusterIdentifiers: [this.cluster.clusterIdentifier],
+      connectionPoolConfigurationInfo: {
+        maxConnectionsPercent: 90,
+        maxIdleConnectionsPercent: 50,
+      },
+    });
+    proxyTargetGroup.addDependency(this.proxy);
+
     NagSuppressions.addResourceSuppressions(
       this.cluster,
       [
@@ -91,7 +141,7 @@ export class AuroraConstruct {
         },
         {
           id: 'AwsSolutions-SMG4',
-          reason: 'Master secret rotation deferred to Slice 4 when RDS Proxy is introduced.',
+          reason: 'Aurora master secret is bound to RDS Proxy (added in this slice). The 30-day HostedRotation single-user schedule remains active; Proxy reads the rotated secret transparently.',
         },
       ],
       true,

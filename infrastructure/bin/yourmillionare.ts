@@ -63,6 +63,7 @@ const data = new DataStack(app, `${config.stackPrefix}-Data`, {
   vpc: network.vpc,
   lambdaSg: network.lambdaSg,
   auroraSg: network.auroraSg,
+  proxySg: network.proxySg,
   sharedKey: foundation.sharedKey,
   availabilityZones: [`${config.region}a`, `${config.region}b`, `${config.region}c`],
 });

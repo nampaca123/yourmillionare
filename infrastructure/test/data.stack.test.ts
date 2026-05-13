@@ -36,6 +36,7 @@ const buildStack = (env: 'dev' | 'prod' = 'dev') => {
     vpc: network.vpc,
     lambdaSg: network.lambdaSg,
     auroraSg: network.auroraSg,
+    proxySg: network.proxySg,
     sharedKey: foundation.sharedKey,
     availabilityZones: [`${TEST_REGION}a`, `${TEST_REGION}b`, `${TEST_REGION}c`],
   });
@@ -121,8 +122,20 @@ describe('DataStack (dev)', () => {
     expect(Object.keys(fns).length).toBeGreaterThanOrEqual(3);
   });
 
-  it('should create 0 RDS Proxy resources (deferred to Slice 4) when synthesized', () => {
-    template.resourceCountIs('AWS::RDS::DBProxy', 0);
+  it('should create an RDS Proxy attached to Aurora cluster with master secret', () => {
+    template.hasResourceProperties('AWS::RDS::DBProxy', {
+      EngineFamily: 'POSTGRESQL',
+      RequireTLS: true,
+      Auth: Match.arrayWith([
+        Match.objectLike({ AuthScheme: 'SECRETS', IAMAuth: 'REQUIRED' }),
+      ]),
+    });
+    template.hasResourceProperties('AWS::RDS::DBProxyTargetGroup', {
+      ConnectionPoolConfigurationInfo: Match.objectLike({
+        MaxConnectionsPercent: 90,
+        MaxIdleConnectionsPercent: 50,
+      }),
+    });
   });
 
   it('should create a CustomResource for schema migration that depends on another CR for verification when synthesized', () => {
@@ -133,6 +146,20 @@ describe('DataStack (dev)', () => {
   it('should emit no cdk-nag errors when synthesized with AwsSolutionsChecks', () => {
     const errors = Annotations.fromStack(stack).findError('*', Match.stringLikeRegexp('AwsSolutions-.*'));
     expect(errors).toEqual([]);
+  });
+
+  it('should create RDS Proxy alarms on key metrics', () => {
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'ConnectionBorrowLatency',
+      Threshold: 50,
+      EvaluationPeriods: 2,
+    });
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'DatabaseConnections',
+    });
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'ClientConnectionsBorrowingFromProxy',
+    });
   });
 });
 

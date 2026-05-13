@@ -19,9 +19,6 @@ export const withRlsContext = async <T>(
   const client = await (await getPool()).connect();
   try {
     await client.query('BEGIN');
-    await client.query('RESET app.cognito_sub');
-    await client.query('RESET app.current_user_id');
-    await client.query('RESET app.current_tenant_id');
 
     if (ctx.cognitoSub) {
       await client.query("SELECT set_config('app.cognito_sub', $1, true)", [ctx.cognitoSub]);

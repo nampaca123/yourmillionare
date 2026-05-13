@@ -83,7 +83,10 @@ VPC 10.20.0.0/16  (3 AZ — a/b/c)
   - IAM auth token 을 15분 TTL 로 캐시, 만료 3분 전 갱신.
   - 동시 refresh 는 in-flight Promise 로 dedup.
   - **`max:1` 이유**: 한 connection 에서 `app.current_tenant_id` / `app.cognito_sub` GUC 를 set 해 PostgreSQL RLS 를 거는 구조이므로, connection sharing 은 안전하지 않다.
-- **RDS Proxy 는 아직 없음** (§5 부하 분산 평가에서 상세).
+- **RDS Proxy 도입 (PR-A 머지 후)**: Aurora writer 앞에 RDS Proxy 1개.
+  - IAM auth (client), Secrets Manager (backend), TLS 양방향 검증 (PR-B1 부터).
+  - `maxConnectionsPercent: 90` / `maxIdleConnectionsPercent: 50` / `idleClientTimeout: 30m`.
+  - Lambda 의 `pg.Pool({ max: 1 })` 은 유지 — Lambda 인스턴스 단위 RLS 컨텍스트 격리는 Proxy 와 무관.
 
 #### DynamoDB 캐시 ([infrastructure/lib/stacks/data/cache.construct.ts](../infrastructure/lib/stacks/data/cache.construct.ts))
 
@@ -206,6 +209,10 @@ HTTP API (regional)
 Lambda (Identity/Journal/Fx/Tax)
   │  RLS GUC set: app.current_tenant_id, app.cognito_sub
   ▼
+RDS Proxy (writer endpoint)
+  │  IAM auth (client), Secrets Manager (backend)
+  │  TLS required (both sides — pinning from PR-B1)
+  ▼
 Aurora Serverless v2 (PRIVATE_ISOLATED)
    ── 또는 ──
 DynamoDB (Idempotency / Cost / Cache)
@@ -298,7 +305,7 @@ Function URL (regional, no API GW)
 | Browser → SSE Function URL | Lambda Function URL (regional, AWS-managed) | 동일 |
 | EventBridge → SFN | SFN 자체가 분산 처리 | Map `maxConcurrency: 3` (CODEF 보호) |
 | SFN Map → SQS → Worker | SQS poll + Lambda event source | `reservedConcurrentExecutions: 5` (Bedrock 비용 보호) |
-| Lambda → Aurora | 각 인스턴스가 `pg.Pool max=1` 직접 연결 | **RDS Proxy 없음** (§5.3 참조) |
+| Lambda → Aurora | 각 인스턴스가 `pg.Pool max=1` → RDS Proxy 가 multiplex → Aurora writer | Proxy 가 connection 풀링 |
 | Lambda → DynamoDB | AWS SDK (DynamoDB on-demand auto-scale) | 테이블당 ~40,000 RCU/WCU (account 한도) |
 | Lambda → Bedrock | cross-region inference profile (`global.anthropic.*`) | account-level Bedrock TPS quota |
 
@@ -315,32 +322,16 @@ Function URL (regional, no API GW)
 | **SQS** | 무제한 buffering | producer 가 send 하면 누적 |
 | **fck-nat** | 수직 확장만 (instance type 변경) | 수동. dev 1대 → 가속 시 t4g.small 등으로 교체 필요 |
 
-### 5.3 RDS Proxy 부재 — 가장 큰 리스크
+### 5.3 RDS Proxy 도입 / 효과 측정
 
-**현 구조**: 각 Lambda 가 `pg.Pool({ max: 1 })` 로 Aurora 에 직접 접속. 이유는 PG RLS GUC (`app.current_tenant_id`, `app.cognito_sub`) 를 connection 단위로 set 하기 때문에 pool 공유가 안전하지 않음.
+PR-A (2026-05-13) 부터 Aurora writer 앞에 RDS Proxy 가 위치한다.
 
-**리스크 시나리오**:
+- **이유**: ACU 비례 `max_connections` (dev 2 ACU ≈ ~430, prod 4 ACU ≈ ~870) 가 동시 Lambda 1000 인스턴스 burst 에 부족해질 수 있음. Proxy 가 client-side 와 backend 를 multiplex 해 connection storm 차단.
+- **RLS 호환성**: `set_config(..., is_local=true)` 가 이미 transaction-scoped 라 Proxy pinning 트리거가 아님. `RESET app.*` 는 PR-A 에서 제거 (session-level statement, pinning 트리거).
+- **연결 경로**: Lambda → IAM token → Proxy endpoint → master secret → Aurora writer.
+- **운영 측정**: §7 의 RDS Proxy metrics 행. `ConnectionBorrowLatency p99 > 50ms`, `DatabaseConnections > 80%`, `ClientConnectionsBorrowing` spike 알람.
 
-- Aurora Serverless v2 의 `max_connections` 는 ACU 비례 — PG 15 에서 `LEAST({DBInstanceClassMemory/9531392}, 5000)` 기반.
-  - **dev 2 ACU (~4GB)**: 약 **~430 connections** 한도.
-  - **prod 4 ACU (~8GB)**: 약 **~870 connections** 한도.
-- 동시 Lambda 인스턴스 1000개 × `max=1` = **1000 connections** 시도 → prod 도 cap 을 넘긴다 (dev 는 매우 빠르게 넘긴다).
-- 실제 burst 트리거:
-  - CODEF 일괄 동기화 시점 (`/fs/sync` 동시 호출 + SQS classify 워커 5 + SFN fetch 3 + HTTP API peak)
-  - 알림톡 발송 직후 사용자 동시 진입
-  - 부가세 마감일 직전 SSE 에이전트 호출 burst
-
-**완화 — 현재 적용된 것**:
-- 클라이언트 측: `pg.Pool` connection 생성 시 IAM token cache 로 throughput 보호 (15분 TTL, 3분 전 refresh, in-flight dedup).
-- 서버 측: `pg-rotation` 30일 cycle 에서만 master 갱신 (rotation 윈도우는 짧다).
-- `classifyWorkerFn` 의 `reservedConcurrentExecutions: 5` 가 가장 hot 한 워크로드를 자체 제한.
-- Aurora 자체는 connection storm 시 부드럽게 거절 (`FATAL: too many connections`) — 앱은 5xx 로 받는다.
-
-**완화 — 누락 / 권고 (Phase 1 로드맵에 이미 표기됨)**:
-1. **RDS Proxy 도입**: 다중 Lambda 가 pinned connection 을 공유, IAM auth + `SET LOCAL` 패턴으로 RLS 호환. [docs/STATUS.md](STATUS.md) 89번 줄에서 "CODEF 폴링 동시성 증가 시점에 도입" 으로 명시.
-   - 단, RLS GUC 는 transaction-scoped (`SET LOCAL`) 로 옮기는 작업이 선결 조건.
-2. **Aurora Reader 추가**: SSE 에이전트는 read-heavy → reader 로 분리하면 writer 의 burst 부담 감소.
-3. **Lambda Reserved Concurrency** 를 HTTP API Lambda 에도 적용 — 현재는 `classifyWorker` 와 `schemaMigrator` 만 cap.
+후속: PR-C 머지 후 cluster 직결 IAM ARN 제거, `lambdaSg → auroraSg 5432` 인바운드 제거 → Proxy 단일 경로.
 
 ### 5.4 API Gateway / Lambda 단의 트래픽 관리
 
@@ -348,7 +339,7 @@ Function URL (regional, no API GW)
 |---|---|
 | API GW Usage Plan / Throttling | 없음 — account 기본 10,000 RPS / region |
 | Per-route Throttling | 없음 |
-| WAF | 없음 |
+| WAF | 없음 — AWS WAF v2 는 API Gateway HTTP API v2 association 미지원. CloudFront 도입 시점에 함께 적용 예정. 자세한 내용 [docs/error-cases/2026-05-14-pr-a-rds-proxy-and-waf.md](../error-cases/2026-05-14-pr-a-rds-proxy-and-waf.md). |
 | CloudFront | 없음 — frontend (Phase 1) 도입 시 함께 검토 |
 | API GW Caching | 없음 (HTTP API 는 캐싱 미지원, REST API 로 마이그레이션 필요) |
 | Lambda Provisioned Concurrency | 없음 — SSE 에이전트 cold start (~500ms-2s) 는 Bedrock TTFT (~1-3s) 에 가려져 큰 문제 아님 |
@@ -414,6 +405,18 @@ Browser ──ID Token── Function URL ─verifyJwt (in-Lambda)── SSE han
 - CODEF / ECOS: 외부 발급 → 자동 rotation 불가. `scripts/sync-secrets-from-env.sh` 로 운영자가 갱신.
 - AWS 키는 `~/.aws/credentials`. `.env` 에는 비-AWS 자격증명만.
 
+### 6.4 WAF 미적용 — HTTP API v2 호환성
+
+PR-A 시도 중 발견: **AWS WAF v2 는 API Gateway HTTP API v2 와 association 자체가 불가능** (REST API 만 지원). 즉 현 아키텍처에서 WAF 를 HTTP API 앞에 직접 부착할 수 없다. 자세한 진단은 [docs/error-cases/2026-05-14-pr-a-rds-proxy-and-waf.md](../error-cases/2026-05-14-pr-a-rds-proxy-and-waf.md) §1.
+
+**잔여 공격 벡터** (HTTP API + SSE Function URL 모두 해당):
+
+1. 유효 Cognito ID Token abuse — 매 호출이 Lambda timeout (HTTP API 30s / SSE 10-14분) + Bedrock 슬롯 점유, `CostCounter` 일일 한도 안에서 무제한.
+2. Connection hold (SSE 만 해당) — long-running 호출이 Proxy backend connection 1 + Bedrock concurrency 1 슬롯을 14분 점유, N 토큰 으로 N 배.
+3. 엔드포인트 발견 — HTTP API hostname / SSE Function URL 호스트 모두 안정, 한 번 leak 시 영구.
+
+**완화 계획**: CloudFront distribution 도입 시점에 그 앞에 WAF v2 association (CloudFront 는 WAF 지원). 프론트팀이 CloudFront 진행 시 함께 수행.
+
 ---
 
 ## 7. 관찰 가능성 (Observability)
@@ -427,6 +430,7 @@ Browser ──ID Token── Function URL ─verifyJwt (in-Lambda)── SSE han
 | SFN execution history | X-Ray (`tracingEnabled: true`) | 90d |
 | Bedrock 비용/호출 | `CostCounter` DDB + Lambda 구조화 로그 (pino) | TTL |
 | DLQ depth | CloudWatch alarm → SNS `IngestionAlarmTopic` | — |
+| RDS Proxy metrics | CloudWatch (ConnectionBorrowLatency, DatabaseConnections, ClientConnectionsBorrowingFromProxy) + Alarms → SNS DataAlarmTopic | — |
 
 전체 Lambda 는 `pino` 구조화 로거를 사용 — `console.*` 금지 ([CLAUDE.md](../CLAUDE.md) 의 절대 금지 항목).
 
@@ -456,12 +460,11 @@ Browser ──ID Token── Function URL ─verifyJwt (in-Lambda)── SSE han
 
 | 항목 | 영향 | 예정 |
 |---|---|---|
-| **RDS Proxy 미도입** | 대규모 동시 Lambda 시 Aurora connection 고갈 가능 | Phase 1 (CODEF 폴링 동시성 증가 시점) |
 | Account isolation 부재 | dev/prod 가 같은 계정 → blast radius 확장 | Phase 1 |
 | CODEF 인증 방식 | loginType=1 (ID/PW) — 5회 잠금 위험 | Phase 1 → loginType=0 (cert) 또는 5 (간편) |
 | CDK Pipelines 없음 | 로컬 cdk deploy만; CI 는 synth 만 | Phase 1 |
 | Domain / Route53 미설정 | Function URL / API GW execute-api 도메인 노출 | Public endpoint 이전 |
-| WAF 없음 | 봇/스크레이프 무방비 | Phase 1 (CloudFront 와 함께) |
+| WAF 미적용 (HTTP API + SSE) | AWS WAF v2 가 HTTP API v2 와 association 불가. HTTP API / SSE Function URL 모두 in-Lambda verifyJwt + CostCounter 만으로 보호. 잔여 공격 벡터는 §6.4 enumerate | CloudFront 도입 시 (Phase 1) |
 | Aurora Reader 없음 | Read 부하가 writer 와 같이 burst | RDS Proxy 와 동시 검토 |
 | API GW per-route throttling | 한 사용자 burst 가 다른 사용자에 영향 | Phase 1 |
 

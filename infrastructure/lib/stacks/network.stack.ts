@@ -17,6 +17,7 @@ import {
   IpAddresses,
   NatProvider,
   NatTrafficDirection,
+  Peer,
   Port,
   SecurityGroup,
   SubnetType,
@@ -46,6 +47,7 @@ export class NetworkStack extends Stack {
   public readonly vpc: Vpc;
   public readonly lambdaSg: SecurityGroup;
   public readonly auroraSg: SecurityGroup;
+  public readonly proxySg: SecurityGroup;
 
   constructor(scope: Construct, id: string, props: NetworkStackProps) {
     super(scope, id, props);
@@ -130,6 +132,19 @@ export class NetworkStack extends Stack {
     });
     this.auroraSg.addIngressRule(this.lambdaSg, Port.tcp(5432), 'Lambdas on 5432');
 
+    this.proxySg = new SecurityGroup(this, 'ProxySg', {
+      vpc: this.vpc,
+      description: 'RDS Proxy ENI security group.',
+      allowAllOutbound: false,
+    });
+    this.auroraSg.addIngressRule(this.proxySg, Port.tcp(5432), 'Proxy on 5432');
+    this.proxySg.addIngressRule(this.lambdaSg, Port.tcp(5432), 'Lambda on 5432');
+    this.proxySg.addEgressRule(
+      Peer.ipv4(vpcCidr),
+      Port.allTraffic(),
+      'Proxy outbound to VPC: Aurora 5432 + SecretsManager/KMS endpoints 443',
+    );
+
     const endpointSubnets = isProd
       ? { subnetType: SubnetType.PRIVATE_ISOLATED }
       : { availabilityZones: [azs[0]], subnetType: SubnetType.PRIVATE_ISOLATED };
@@ -166,6 +181,7 @@ export class NetworkStack extends Stack {
     new CfnOutput(this, 'VpcId', { value: this.vpc.vpcId, exportName: `${id}-VpcId` });
     new CfnOutput(this, 'LambdaSgId', { value: this.lambdaSg.securityGroupId, exportName: `${id}-LambdaSgId` });
     new CfnOutput(this, 'AuroraSgId', { value: this.auroraSg.securityGroupId, exportName: `${id}-AuroraSgId` });
+    new CfnOutput(this, 'ProxySgId', { value: this.proxySg.securityGroupId, exportName: `${id}-ProxySgId` });
     new CfnOutput(this, 'FlowLogsGroupArn', { value: flowLogsGroup.logGroupArn, exportName: `${id}-FlowLogsGroupArn` });
     new CfnOutput(this, 'EgressVerifierFnName', { value: egressVerifierFn.functionName });
 

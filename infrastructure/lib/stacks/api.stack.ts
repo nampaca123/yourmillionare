@@ -3,7 +3,7 @@
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
-import { CfnOutput, Duration, Stack } from 'aws-cdk-lib';
+import { CfnOutput, Duration, Fn, Stack } from 'aws-cdk-lib';
 import type { StackProps } from 'aws-cdk-lib';
 import { HttpApi, HttpMethod } from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpJwtAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
@@ -68,6 +68,7 @@ export class ApiStack extends Stack {
     const isProd = props.deploymentEnv === 'prod';
     const region = Stack.of(this).region;
     const account = Stack.of(this).account;
+    const proxyResourceId = Fn.select(6, Fn.split(':', props.aurora.proxy.attrDbProxyArn));
 
     // --- KMS keys for biz_reg_no encryption and HMAC ---
     const bizRegKey = new Key(this, 'BizRegNoKey', {
@@ -133,6 +134,7 @@ export class ApiStack extends Stack {
         actions: ['rds-db:connect'],
         resources: [
           `arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`,
+          `arn:aws:rds-db:${region}:${account}:dbuser:${proxyResourceId}/app_user`,
         ],
       }),
     );
@@ -177,6 +179,7 @@ export class ApiStack extends Stack {
         actions: ['rds-db:connect'],
         resources: [
           `arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`,
+          `arn:aws:rds-db:${region}:${account}:dbuser:${proxyResourceId}/app_user`,
         ],
       }),
     );
@@ -221,7 +224,10 @@ export class ApiStack extends Stack {
     fxFn.addToRolePolicy(
       new PolicyStatement({
         actions: ['rds-db:connect'],
-        resources: [`arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`],
+        resources: [
+          `arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`,
+          `arn:aws:rds-db:${region}:${account}:dbuser:${proxyResourceId}/app_user`,
+        ],
       }),
     );
     props.ecosSecret.grantRead(fxFn);
@@ -254,7 +260,10 @@ export class ApiStack extends Stack {
     taxFn.addToRolePolicy(
       new PolicyStatement({
         actions: ['rds-db:connect'],
-        resources: [`arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`],
+        resources: [
+          `arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`,
+          `arn:aws:rds-db:${region}:${account}:dbuser:${proxyResourceId}/app_user`,
+        ],
       }),
     );
 
@@ -300,7 +309,10 @@ export class ApiStack extends Stack {
     taxStrategyFn.addToRolePolicy(
       new PolicyStatement({
         actions: ['rds-db:connect'],
-        resources: [`arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`],
+        resources: [
+          `arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`,
+          `arn:aws:rds-db:${region}:${account}:dbuser:${proxyResourceId}/app_user`,
+        ],
       }),
     );
     taxStrategyFn.addToRolePolicy(
@@ -358,7 +370,10 @@ export class ApiStack extends Stack {
     fxStrategyFn.addToRolePolicy(
       new PolicyStatement({
         actions: ['rds-db:connect'],
-        resources: [`arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`],
+        resources: [
+          `arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`,
+          `arn:aws:rds-db:${region}:${account}:dbuser:${proxyResourceId}/app_user`,
+        ],
       }),
     );
     fxStrategyFn.addToRolePolicy(
@@ -414,7 +429,10 @@ export class ApiStack extends Stack {
     codefSyncStreamFn.addToRolePolicy(
       new PolicyStatement({
         actions: ['rds-db:connect'],
-        resources: [`arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`],
+        resources: [
+          `arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`,
+          `arn:aws:rds-db:${region}:${account}:dbuser:${proxyResourceId}/app_user`,
+        ],
       }),
     );
     codefSyncStreamFn.addToRolePolicy(
@@ -509,7 +527,10 @@ export class ApiStack extends Stack {
     taxKnowledgeFn.addToRolePolicy(
       new PolicyStatement({
         actions: ['rds-db:connect'],
-        resources: [`arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`],
+        resources: [
+          `arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`,
+          `arn:aws:rds-db:${region}:${account}:dbuser:${proxyResourceId}/app_user`,
+        ],
       }),
     );
     taxKnowledgeFn.addToRolePolicy(
