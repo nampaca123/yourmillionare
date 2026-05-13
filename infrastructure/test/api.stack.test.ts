@@ -38,6 +38,7 @@ const buildStack = (env: 'dev' | 'prod' = 'dev') => {
     vpc: network.vpc,
     lambdaSg: network.lambdaSg,
     auroraSg: network.auroraSg,
+    proxySg: network.proxySg,
     sharedKey: foundation.sharedKey,
     availabilityZones: [`${TEST_REGION}a`, `${TEST_REGION}b`, `${TEST_REGION}c`],
   });
@@ -138,6 +139,24 @@ describe('ApiStack (dev)', () => {
       },
     });
     expect(Object.keys(policies).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('should grant rds-db:connect on both cluster and proxy resource IDs', () => {
+    const policies = template.findResources('AWS::IAM::Policy', {
+      Properties: {
+        PolicyDocument: Match.objectLike({
+          Statement: Match.arrayWith([
+            Match.objectLike({ Action: 'rds-db:connect' }),
+          ]),
+        }),
+      },
+    });
+    expect(Object.keys(policies).length).toBe(8);
+    for (const policy of Object.values(policies)) {
+      const stmt = (policy as { Properties: { PolicyDocument: { Statement: Array<{ Action: string; Resource: unknown[] }> } } })
+        .Properties.PolicyDocument.Statement.find((s) => s.Action === 'rds-db:connect');
+      expect(stmt?.Resource).toHaveLength(2);
+    }
   });
 
   it('should emit no cdk-nag errors when synthesized with AwsSolutionsChecks', () => {
