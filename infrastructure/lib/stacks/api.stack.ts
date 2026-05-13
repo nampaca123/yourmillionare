@@ -50,9 +50,9 @@ const TAX_STRATEGY_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax/src/infrast
 const CODEF_SYNC_STREAM_LAMBDA_ENTRY = join(__dirname, '../../../apps/codef/src/infrastructure/inbound/streaming/fs-sync-stream.lambda.ts');
 const TAX_KNOWLEDGE_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax-knowledge/src/infrastructure/inbound/http/tax-knowledge.lambda.ts');
 const API_NOT_FOUND_LAMBDA_ENTRY = join(__dirname, '../lambdas/api-not-found.lambda.ts');
-// Sonnet 4.6 for cheap deterministic work (transaction classification). Opus 4.7 for advisory/reasoning agents.
+// Sonnet 4.6 for cheap deterministic work (transaction classification). Opus 4.6 for advisory/reasoning agents (Opus 4.7 model access not yet granted on this AWS account; revisit once approved).
 const BEDROCK_CLASSIFIER_MODEL_ID = 'global.anthropic.claude-sonnet-4-6';
-const BEDROCK_STRATEGY_MODEL_ID = 'global.anthropic.claude-opus-4-7';
+const BEDROCK_STRATEGY_MODEL_ID = 'global.anthropic.claude-opus-4-6-v1';
 const RERANK_REGION_DEFAULT = 'ap-northeast-1';
 const RERANK_MODEL_DEFAULT = 'cohere.rerank-v3-5:0';
 const EMBED_MODEL_DEFAULT = 'amazon.titan-embed-text-v2:0';
