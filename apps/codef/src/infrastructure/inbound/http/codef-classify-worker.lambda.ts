@@ -28,6 +28,7 @@ const cacheProjector = new DdbCacheProjectorAdapter();
 interface ClassifyTask {
   rawTransactionId: string;
   tenantId: string;
+  syncRunId: string | null;
 }
 
 export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
@@ -45,7 +46,7 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
         continue;
       }
 
-      const { rawTransactionId, tenantId } = task;
+      const { rawTransactionId, tenantId, syncRunId } = task;
 
       const pool = await getPool();
       const client = await pool.connect();
@@ -102,20 +103,22 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
         if (classifyResult.confidence < DRAFT_CONFIDENCE_THRESHOLD) {
           await client.query(
             `INSERT INTO journal_entry_draft
-               (raw_transaction_id, tenant_id, draft_lines, ai_confidence, rule_id, origin, status)
-             VALUES ($1, $2, $3::jsonb, $4, $5, 'ai_low_conf', 'pending')
+               (raw_transaction_id, tenant_id, draft_lines, ai_confidence, rule_id, origin, status, sync_run_id)
+             VALUES ($1, $2, $3::jsonb, $4, $5, 'ai_low_conf', 'pending', $6)
              ON CONFLICT (raw_transaction_id) DO UPDATE
-               SET draft_lines = EXCLUDED.draft_lines,
+               SET draft_lines  = EXCLUDED.draft_lines,
                    ai_confidence = EXCLUDED.ai_confidence,
-                   rule_id = EXCLUDED.rule_id,
-                   origin = 'ai_low_conf',
-                   status = 'pending'`,
+                   rule_id      = EXCLUDED.rule_id,
+                   origin       = 'ai_low_conf',
+                   status       = 'pending',
+                   sync_run_id  = COALESCE(EXCLUDED.sync_run_id, journal_entry_draft.sync_run_id)`,
             [
               rawTransactionId,
               tenantId,
               JSON.stringify(classifyResult.lines),
               classifyResult.confidence,
               `bedrock:${classifyResult.modelId}`,
+              syncRunId,
             ],
           );
           await markDispatched(client, [rawTransactionId]);
@@ -158,6 +161,12 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
               classifyResult.confidence,
             ],
           );
+          if (syncRunId) {
+            await client.query(
+              `UPDATE journal_entries SET sync_run_id = $1 WHERE id = $2 AND tenant_id = $3`,
+              [syncRunId, saved.id, tenantId],
+            );
+          }
           await client.query(
             `DELETE FROM journal_entry_draft WHERE raw_transaction_id = $1 AND tenant_id = $2`,
             [rawTransactionId, tenantId],

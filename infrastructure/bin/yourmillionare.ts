@@ -104,7 +104,6 @@ const api = new ApiStack(app, `${config.stackPrefix}-Api`, {
   identity,
   sharedKey: foundation.sharedKey,
   codefSecret: foundation.codefCredentialSecret,
-  manualSyncStateMachineArn: ingestion.manualSyncStateMachineArn,
   legalSyncStateMachineArn: ingestion.legalSyncStateMachineArn,
   legalKbId: ingestion.legalKbId,
   filingGeneratorFnArn: ingestion.filingGeneratorFn.functionArn,

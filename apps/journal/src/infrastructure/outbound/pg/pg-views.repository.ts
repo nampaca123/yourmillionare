@@ -3,7 +3,6 @@
 import { withRlsContext } from './pg-rls.context.js';
 import type {
   AccountBalanceCard,
-  JournalEntryDraft,
   MonthlySummary,
   ReceivablesBoard,
   ReceivableCard,
@@ -36,18 +35,6 @@ interface BalanceRow {
   type: 'asset' | 'liability' | 'equity' | 'revenue' | 'expense';
   currency: string;
   balance: string;
-}
-
-interface DraftRow {
-  raw_transaction_id: string;
-  tenant_id: string;
-  draft_lines: unknown;
-  origin: 'heuristic' | 'ai_low_conf';
-  heuristic_confidence: string | null;
-  ai_confidence: string | null;
-  rule_id: string | null;
-  status: 'pending' | 'accepted' | 'discarded';
-  created_at: Date;
 }
 
 const ymRange = (ym: string): { fromDate: string; toDate: string } => {
@@ -202,29 +189,4 @@ export class PgViewsRepository implements ViewsRepository {
     });
   }
 
-  async listDrafts({ tenantId }: { tenantId: string }): Promise<ReadonlyArray<JournalEntryDraft>> {
-    return withRlsContext({ tenantId, cognitoSub: 'system' }, async (client) => {
-      const result = await client.query<DraftRow>(
-        `SELECT raw_transaction_id, tenant_id, draft_lines, origin,
-                heuristic_confidence::text, ai_confidence::text,
-                rule_id, status, created_at
-           FROM journal_entry_draft
-          WHERE tenant_id = $1 AND status = 'pending'
-       ORDER BY created_at DESC
-          LIMIT 200`,
-        [tenantId],
-      );
-      return result.rows.map((row) => ({
-        rawTransactionId: row.raw_transaction_id,
-        tenantId: row.tenant_id,
-        draftLines: row.draft_lines as JournalEntryDraft['draftLines'],
-        origin: row.origin,
-        aiConfidence: row.ai_confidence ? Number.parseFloat(row.ai_confidence) : null,
-        heuristicConfidence: row.heuristic_confidence ? Number.parseFloat(row.heuristic_confidence) : null,
-        ruleId: row.rule_id,
-        status: row.status,
-        createdAt: row.created_at.toISOString(),
-      }));
-    });
-  }
 }

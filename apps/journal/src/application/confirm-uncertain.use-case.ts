@@ -1,4 +1,4 @@
-// Use case: promote a pending journal_entry_draft to a posted journal_entry, optionally with user-corrected lines.
+// Use case: promote a pending uncertain draft to a certain journal_entry, optionally with user-corrected lines.
 
 import { randomUUID } from 'node:crypto';
 import { createJournalEntry } from '@ym/journal-core';
@@ -17,14 +17,14 @@ interface CorrectedLineInput {
   readonly memo?: string | null | undefined;
 }
 
-export interface AcceptDraftResult {
+export interface ConfirmUncertainResult {
+  readonly rawTransactionId: string;
   readonly journalEntryId: string;
-  readonly status: 'posted';
+  readonly status: 'certain';
   readonly entryDate: string;
-  readonly origin: 'heuristic' | 'ai_low_conf';
 }
 
-export class AcceptDraftUseCase {
+export class ConfirmUncertainUseCase {
   constructor(
     private readonly verifyMembership: VerifyTenantMembershipUseCase,
     private readonly drafts: DraftRepository,
@@ -37,7 +37,7 @@ export class AcceptDraftUseCase {
     cognitoSub: string;
     rawTransactionId: string;
     correctedLines?: ReadonlyArray<CorrectedLineInput>;
-  }): Promise<AcceptDraftResult> {
+  }): Promise<ConfirmUncertainResult> {
     await this.verifyMembership.execute({
       tenantId: params.tenantId,
       userId: params.userId,
@@ -50,7 +50,7 @@ export class AcceptDraftUseCase {
     });
 
     if (!draft) {
-      throw new NotFoundError(`Pending draft not found for raw transaction ${params.rawTransactionId}`);
+      throw new NotFoundError(`Uncertain classification not found for raw transaction ${params.rawTransactionId}`);
     }
 
     type Line = { lineNo: number; accountCode: string; debit: number; credit: number; memo?: string };
@@ -99,16 +99,16 @@ export class AcceptDraftUseCase {
       });
     } catch (err) {
       if (err instanceof Error && err.message.includes('duplicate')) {
-        throw new ConflictError(`Draft ${params.rawTransactionId} already accepted`);
+        throw new ConflictError(`Uncertain ${params.rawTransactionId} already confirmed`);
       }
       throw err;
     }
 
     return {
+      rawTransactionId: params.rawTransactionId,
       journalEntryId,
-      status: 'posted',
+      status: 'certain',
       entryDate,
-      origin: draft.origin,
     };
   }
 }

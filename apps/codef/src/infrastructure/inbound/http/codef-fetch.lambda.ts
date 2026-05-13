@@ -1,4 +1,4 @@
-// Lambda entry point: fetches CODEF bank transactions per tenant, records per-account outcomes, and queues new tx for classification.
+// Lambda entry point: fetches CODEF bank transactions per tenant, records per-account outcomes (with balance snapshots), and queues new tx for classification.
 
 import type { PoolClient } from 'pg';
 import { withRlsContext } from '../../outbound/pg/pg-rls.context.js';
@@ -29,6 +29,10 @@ const SOURCE = 'codef_bank';
 interface FetchPayload {
   tenantId: string;
   syncRunId?: string;
+  dateRangeFrom?: string | null;
+  dateRangeTo?: string | null;
+  accountIds?: ReadonlyArray<string> | null;
+  reclassify?: boolean;
 }
 
 interface FetchResult {
@@ -40,12 +44,15 @@ interface FetchResult {
 }
 
 interface BankAccountRow {
+  id: string;
   organization: string;
   account_number: string;
   connected_id: string | null;
+  last_balance_krw: string | null;
 }
 
 interface AccountResult {
+  bankAccountId: string;
   organization: string;
   accountNumber: string;
   outcome: SyncRunAccountOutcome;
@@ -54,6 +61,8 @@ interface AccountResult {
   userMessage?: string;
   fetchedCount: number;
   balanceUpdated: boolean;
+  previousBalance: number | null;
+  currentBalance: number | null;
   newRawTxIds: string[];
 }
 
@@ -63,6 +72,8 @@ const toDateStr = (date: Date): string => {
   const d = String(date.getDate()).padStart(2, '0');
   return `${y}${m}${d}`;
 };
+
+const isoToCompact = (iso: string): string => iso.replace(/-/g, '');
 
 const summarize = (results: AccountResult[]): string => {
   const success = results.filter((r) => r.outcome === 'success').length;
@@ -100,32 +111,38 @@ const updateBalance = async (
   return true;
 };
 
-const processAccount = async (
-  tenantId: string,
-  account: BankAccountRow,
-  endDate: string,
-): Promise<AccountResult> => {
+interface ProcessAccountInput {
+  tenantId: string;
+  account: BankAccountRow;
+  syncRunId: string | null;
+  startDate: string;
+  endDate: string;
+}
+
+const processAccount = async ({
+  tenantId,
+  account,
+  syncRunId,
+  startDate,
+  endDate,
+}: ProcessAccountInput): Promise<AccountResult> => {
+  const previousBalance = account.last_balance_krw !== null
+    ? Number.parseFloat(account.last_balance_krw)
+    : null;
   const base = {
+    bankAccountId: account.id,
     organization: account.organization,
     accountNumber: account.account_number,
     fetchedCount: 0,
     balanceUpdated: false,
+    previousBalance,
+    currentBalance: null as number | null,
     newRawTxIds: [] as string[],
   };
 
   if (!account.connected_id) {
     return { ...base, outcome: 'no_connection', userMessage: NO_CONNECTION_USER_MESSAGE };
   }
-
-  const latestFetchedAt = await withRlsContext({ cognitoSub: 'system', tenantId }, (client) =>
-    findLatestFetchedAt(client, tenantId, SOURCE),
-  );
-
-  const startDateObj = latestFetchedAt
-    ? new Date(latestFetchedAt.getTime() - DEFAULT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000)
-    : new Date(Date.now() - INITIAL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
-
-  const startDate = toDateStr(startDateObj);
 
   const codefRes = await fetchTransactions({
     connectedId: account.connected_id,
@@ -148,23 +165,33 @@ const processAccount = async (
   const balanceUpdated = codefRes.data.balance
     ? await updateBalance(tenantId, account, codefRes.data.balance)
     : false;
+  const currentBalance = codefRes.data.balance ? codefRes.data.balance.currentBalanceKrw : null;
 
   if (codefRes.data.transactions.length === 0) {
     return {
       ...base,
       outcome: balanceUpdated ? 'balance_only' : 'empty_result',
       balanceUpdated,
+      currentBalance,
     };
   }
 
   const newIds = await withRlsContext({ cognitoSub: 'system', tenantId }, (client) =>
-    upsertBatch(client, tenantId, SOURCE, codefRes.data.transactions),
+    upsertBatch({
+      client,
+      tenantId,
+      source: SOURCE,
+      bankAccountId: account.id,
+      syncRunId,
+      txs: codefRes.data.transactions,
+    }),
   );
 
   return {
     ...base,
     outcome: 'success',
     balanceUpdated,
+    currentBalance,
     fetchedCount: codefRes.data.transactions.length,
     newRawTxIds: newIds,
   };
@@ -180,6 +207,7 @@ const recordOutcomes = async (
       await recordAccountOutcome(client, {
         syncRunId,
         tenantId,
+        bankAccountId: result.bankAccountId,
         organization: result.organization,
         accountNumber: result.accountNumber,
         outcome: result.outcome,
@@ -188,6 +216,8 @@ const recordOutcomes = async (
         userMessage: result.userMessage ?? null,
         fetchedCount: result.fetchedCount,
         balanceUpdated: result.balanceUpdated,
+        previousBalance: result.previousBalance,
+        currentBalance: result.currentBalance,
       });
     }
   });
@@ -206,17 +236,59 @@ const finalizeSyncRun = async (
     (r) => r.outcome === 'empty_result' || r.outcome === 'balance_only',
   ).length;
 
-  await withRlsContext({ cognitoSub: 'system', tenantId }, (client: PoolClient) =>
-    completeSyncRun(client, {
+  await withRlsContext({ cognitoSub: 'system', tenantId }, async (client: PoolClient) => {
+    await completeSyncRun(client, {
       syncRunId,
       totalAccounts: results.length,
       successCount,
       errorCount,
       emptyCount,
       userSummary: summarize(results),
-    }),
-  );
+    });
+  });
 };
+
+const resolveDateRange = async (
+  tenantId: string,
+  payload: FetchPayload,
+): Promise<{ startDate: string; endDate: string }> => {
+  if (payload.dateRangeFrom && payload.dateRangeTo) {
+    return {
+      startDate: isoToCompact(payload.dateRangeFrom),
+      endDate: isoToCompact(payload.dateRangeTo),
+    };
+  }
+  const latestFetchedAt = await withRlsContext({ cognitoSub: 'system', tenantId }, (client) =>
+    findLatestFetchedAt(client, tenantId, SOURCE),
+  );
+  const startDateObj = latestFetchedAt
+    ? new Date(latestFetchedAt.getTime() - DEFAULT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000)
+    : new Date(Date.now() - INITIAL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+  return { startDate: toDateStr(startDateObj), endDate: toDateStr(new Date()) };
+};
+
+const loadAccounts = async (
+  tenantId: string,
+  accountIds: ReadonlyArray<string> | null | undefined,
+): Promise<BankAccountRow[]> =>
+  withRlsContext({ cognitoSub: 'system', tenantId }, async (client) => {
+    if (accountIds && accountIds.length > 0) {
+      const result = await client.query<BankAccountRow>(
+        `SELECT id, organization, account_number, connected_id, last_balance_krw::text
+           FROM tenant_bank_accounts
+          WHERE tenant_id = $1 AND is_active = TRUE AND id = ANY($2::uuid[])`,
+        [tenantId, accountIds],
+      );
+      return result.rows;
+    }
+    const result = await client.query<BankAccountRow>(
+      `SELECT id, organization, account_number, connected_id, last_balance_krw::text
+         FROM tenant_bank_accounts
+        WHERE tenant_id = $1 AND is_active = TRUE`,
+      [tenantId],
+    );
+    return result.rows;
+  });
 
 export const handler = async (event: FetchPayload): Promise<FetchResult> => {
   const { tenantId, syncRunId } = event;
@@ -231,15 +303,7 @@ export const handler = async (event: FetchPayload): Promise<FetchResult> => {
   const results: AccountResult[] = [];
 
   try {
-    const accounts = await withRlsContext({ cognitoSub: 'system', tenantId }, async (client) => {
-      const result = await client.query<BankAccountRow>(
-        `SELECT organization, account_number, connected_id
-         FROM tenant_bank_accounts
-         WHERE tenant_id = $1 AND is_active = TRUE`,
-        [tenantId],
-      );
-      return result.rows;
-    });
+    const accounts = await loadAccounts(tenantId, event.accountIds ?? null);
 
     if (accounts.length === 0) {
       log.info('No active bank accounts for tenant');
@@ -249,10 +313,16 @@ export const handler = async (event: FetchPayload): Promise<FetchResult> => {
       return { tenantId, syncRunId: syncRunId ?? null, fetched: 0, queued: 0, outcomes: [] };
     }
 
-    const endDate = toDateStr(new Date());
+    const { startDate, endDate } = await resolveDateRange(tenantId, event);
 
     for (const account of accounts) {
-      const result = await processAccount(tenantId, account, endDate);
+      const result = await processAccount({
+        tenantId,
+        account,
+        syncRunId: syncRunId ?? null,
+        startDate,
+        endDate,
+      });
       log.info(
         {
           organization: account.organization,
@@ -269,7 +339,9 @@ export const handler = async (event: FetchPayload): Promise<FetchResult> => {
     const totalFetched = results.reduce((sum, r) => sum + r.fetchedCount, 0);
 
     if (allNewIds.length > 0) {
-      await sendTaskBatch(allNewIds.map((id) => ({ rawTransactionId: id, tenantId })));
+      await sendTaskBatch(
+        allNewIds.map((id) => ({ rawTransactionId: id, tenantId, syncRunId: syncRunId ?? null })),
+      );
 
       await withRlsContext({ cognitoSub: 'system', tenantId }, (client) =>
         markDispatched(client, allNewIds),

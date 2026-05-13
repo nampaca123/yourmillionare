@@ -36,24 +36,6 @@ export interface AccountBalanceCard {
   readonly currency: string;
 }
 
-export interface JournalEntryDraft {
-  readonly rawTransactionId: string;
-  readonly tenantId: string;
-  readonly draftLines: ReadonlyArray<{
-    lineNo: number;
-    accountCode: string;
-    debit: number;
-    credit: number;
-    memo: string | null;
-  }>;
-  readonly origin: 'heuristic' | 'ai_low_conf';
-  readonly aiConfidence: number | null;
-  readonly heuristicConfidence: number | null;
-  readonly ruleId: string | null;
-  readonly status: 'pending' | 'accepted' | 'discarded';
-  readonly createdAt: string;
-}
-
 export interface ViewsRepository {
   monthlySummary(input: { tenantId: string; ym: string }): Promise<MonthlySummary>;
   listReceivables(input: { tenantId: string; today: string; dueSoonDays: number }): Promise<ReceivablesBoard>;
@@ -64,5 +46,4 @@ export interface ViewsRepository {
     collectedAt?: string;
   }): Promise<void>;
   listAccountBalances(input: { tenantId: string }): Promise<ReadonlyArray<AccountBalanceCard>>;
-  listDrafts(input: { tenantId: string }): Promise<ReadonlyArray<JournalEntryDraft>>;
 }

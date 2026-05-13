@@ -64,6 +64,17 @@ export class PgDraftRepository implements DraftRepository {
       await input.work(client);
 
       await client.query(
+        `UPDATE journal_entries
+            SET sync_run_id = jed.sync_run_id
+           FROM journal_entry_draft jed
+          WHERE jed.raw_transaction_id = $1
+            AND jed.tenant_id          = $2
+            AND journal_entries.id     = $3
+            AND journal_entries.tenant_id = $2`,
+        [input.rawTransactionId, input.tenantId, input.journalEntryId],
+      );
+
+      await client.query(
         `UPDATE journal_entry_draft
             SET status = 'accepted',
                 accepted_at = now(),
@@ -88,6 +99,24 @@ export class PgDraftRepository implements DraftRepository {
           input.correctedLines !== null,
         ],
       );
+    });
+  }
+
+  async markDiscarded({
+    tenantId,
+    rawTransactionId,
+  }: {
+    tenantId: string;
+    rawTransactionId: string;
+  }): Promise<boolean> {
+    return withRlsContext({ tenantId, cognitoSub: 'system' }, async (client) => {
+      const result = await client.query(
+        `UPDATE journal_entry_draft
+            SET status = 'discarded'
+          WHERE raw_transaction_id = $1 AND tenant_id = $2 AND status = 'pending'`,
+        [rawTransactionId, tenantId],
+      );
+      return (result.rowCount ?? 0) > 0;
     });
   }
 }

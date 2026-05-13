@@ -34,4 +34,5 @@ export interface DraftRepository {
     entryDate: string;
     work: (client: PoolClient) => Promise<void>;
   }): Promise<void>;
+  markDiscarded(input: { tenantId: string; rawTransactionId: string }): Promise<boolean>;
 }
