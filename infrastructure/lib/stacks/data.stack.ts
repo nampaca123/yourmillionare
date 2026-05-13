@@ -27,6 +27,7 @@ export interface DataStackProps extends StackProps {
   readonly vpc: IVpc;
   readonly lambdaSg: ISecurityGroup;
   readonly auroraSg: ISecurityGroup;
+  readonly proxySg: ISecurityGroup;
   readonly sharedKey: IKey;
   readonly availabilityZones: string[];
 }
@@ -68,6 +69,7 @@ export class DataStack extends Stack {
       deploymentEnv: props.deploymentEnv,
       vpc: props.vpc,
       auroraSg: props.auroraSg,
+      proxySg: props.proxySg,
     });
 
     const aurora = this.aurora;

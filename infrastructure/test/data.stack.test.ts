@@ -36,6 +36,7 @@ const buildStack = (env: 'dev' | 'prod' = 'dev') => {
     vpc: network.vpc,
     lambdaSg: network.lambdaSg,
     auroraSg: network.auroraSg,
+    proxySg: network.proxySg,
     sharedKey: foundation.sharedKey,
     availabilityZones: [`${TEST_REGION}a`, `${TEST_REGION}b`, `${TEST_REGION}c`],
   });
@@ -121,8 +122,20 @@ describe('DataStack (dev)', () => {
     expect(Object.keys(fns).length).toBeGreaterThanOrEqual(3);
   });
 
-  it('should create 0 RDS Proxy resources (deferred to Slice 4) when synthesized', () => {
-    template.resourceCountIs('AWS::RDS::DBProxy', 0);
+  it('should create an RDS Proxy attached to Aurora cluster with master secret', () => {
+    template.hasResourceProperties('AWS::RDS::DBProxy', {
+      EngineFamily: 'POSTGRESQL',
+      RequireTLS: true,
+      Auth: Match.arrayWith([
+        Match.objectLike({ AuthScheme: 'SECRETS', IAMAuth: 'REQUIRED' }),
+      ]),
+    });
+    template.hasResourceProperties('AWS::RDS::DBProxyTargetGroup', {
+      ConnectionPoolConfigurationInfo: Match.objectLike({
+        MaxConnectionsPercent: 90,
+        MaxIdleConnectionsPercent: 50,
+      }),
+    });
   });
 
   it('should create a CustomResource for schema migration that depends on another CR for verification when synthesized', () => {
