@@ -679,10 +679,8 @@ export class ApiStack extends Stack {
       });
     }
 
-    // Tax-Knowledge routes (AgentCore-style tools + admin)
+    // Tax-Knowledge routes (admin only — agent-* tool endpoints moved into apps/tax via PR4.5)
     for (const [method, path] of [
-      [HttpMethod.POST, '/tenants/{tenantId}/agent/search-tax-law'],
-      [HttpMethod.POST, '/tenants/{tenantId}/agent/find-benefits'],
       [HttpMethod.GET, '/admin/tax-rules'],
       [HttpMethod.POST, '/admin/tax-rules/{id}/approve'],
       [HttpMethod.GET, '/admin/tax-rules/{id}/change-log'],

@@ -1,15 +1,15 @@
 # 슬라이스 진행 현황
 
-## 스택별 상태 (Slice 7 통합 보완 진행 중)
+## 스택별 상태 (Slice 8 — FX workflow 완료)
 
 | 스택 | 상태 | 비고 |
 |------|------|------|
 | `Ym-Dev-Foundation` | ✅ DEPLOYED | KMS CMK, **CODEF + ECOS** Secrets 슬롯 |
 | `Ym-Dev-Network` | ✅ DEPLOYED | VPC, SG, VPC Endpoints, NAT Instance, PRIVATE_WITH_EGRESS |
-| `Ym-Dev-Data` | ✅ DEPLOYED (Slice 7) | Aurora + 마이그레이션 **0006–0015** + 28 tables + 42 RLS 정책 + verifier 갱신 + journal_entry_draft + tax_rule + tax_law_chunk_meta + holiday_cache + filing_obligation + withholding_payment + tax_invoice + penalty_calculation + notification_event |
+| `Ym-Dev-Data` | ✅ DEPLOYED (Slice 8) | Aurora + 마이그레이션 **0001–0024** + 29 tables + 44 RLS 정책 (sync_run/sync_run_account 추가, journal_entry_draft DROP). 0024는 tenant_bank_accounts 멀티통화 (account_kind/currency/is_manual/manual_balance_fcy/bank_label) |
 | `Ym-Dev-Identity` | ✅ DEPLOYED | Cognito User Pool + Client + Hosted UI + Google IdP |
-| `Ym-Dev-Api` | ✅ DEPLOYED (Slice 7) | HTTP API + Identity / Journal / **신규: Fx / Tax / TaxKnowledge** Lambda — 라우트 9 → **28** (live 검증 16/19 신규 PASS) |
-| `Ym-Dev-Ingestion` | ✅ DEPLOYED (Slice 7) | CODEF EDA 그대로 + **신규: ManualSyncStateMachine + LegalSyncStateMachine (stub) + LegalSyncScheduleRule (월 1회 KST 03:00)** |
+| `Ym-Dev-Api` | ✅ DEPLOYED (Slice 8) | HTTP API + Identity / Journal / Fx / Tax / TaxKnowledge Lambda + **3 SSE Function URLs (CodefSyncStream, TaxStrategy, FxStrategy)**. 라우트 43개 explicit + 12 catch-all = 55. 중복된 `/agent/search-tax-law` / `/agent/find-benefits` 제거 (tax/strategy로 통합). |
+| `Ym-Dev-Ingestion` | ✅ DEPLOYED (Slice 8) | CODEF EDA + LegalSyncStateMachine + **FxCollectorFn (ECOS hourly upsert, VPC + Aurora + Secrets Manager 시크릿)** |
 
 ## Slice 7 라이브 검증 결과 (2026-05-12 dev)
 
