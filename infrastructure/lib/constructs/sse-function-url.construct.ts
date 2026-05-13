@@ -10,7 +10,7 @@ import { Construct } from 'constructs';
 import { buildFunctionUrlCors } from '../config/cors.config.js';
 
 const DEFAULT_MEMORY_MB = 512;
-const DEFAULT_TIMEOUT = Duration.minutes(3);
+const DEFAULT_TIMEOUT = Duration.minutes(10);
 const DEFAULT_RUNTIME = Runtime.NODEJS_20_X;
 const DEFAULT_ARCHITECTURE = Architecture.ARM_64;
 

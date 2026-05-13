@@ -87,17 +87,27 @@ describe('ApiStack (dev)', () => {
     template.resourceCountIs('AWS::ApiGatewayV2::Authorizer', 1);
   });
 
-  it('should create exactly 43 routes when synthesized (41 explicit + 2 catch-all `/` and `/{proxy+}` for CORS-friendly 404s)', () => {
-    template.resourceCountIs('AWS::ApiGatewayV2::Route', 43);
+  it('should create exactly 53 routes when synthesized (41 explicit + 12 catch-all = 6 verbs x 2 paths /, /{proxy+})', () => {
+    template.resourceCountIs('AWS::ApiGatewayV2::Route', 53);
   });
 
-  it('should attach the not-found integration to the catch-all routes for unmatched paths', () => {
+  it('should attach not-found integration on non-OPTIONS verbs only so corsPreflight stays in charge of OPTIONS', () => {
     template.hasResourceProperties('AWS::ApiGatewayV2::Route', {
-      RouteKey: 'ANY /{proxy+}',
+      RouteKey: 'GET /{proxy+}',
     });
     template.hasResourceProperties('AWS::ApiGatewayV2::Route', {
-      RouteKey: 'ANY /',
+      RouteKey: 'POST /{proxy+}',
     });
+    template.hasResourceProperties('AWS::ApiGatewayV2::Route', {
+      RouteKey: 'POST /',
+    });
+  });
+
+  it('should NOT register an OPTIONS catch-all route (would shadow corsPreflight)', () => {
+    const routes = template.findResources('AWS::ApiGatewayV2::Route', {
+      Properties: { RouteKey: 'OPTIONS /{proxy+}' },
+    });
+    expect(Object.keys(routes).length).toBe(0);
   });
 
   it('should create 1 Lambda function for the identity handler when synthesized', () => {

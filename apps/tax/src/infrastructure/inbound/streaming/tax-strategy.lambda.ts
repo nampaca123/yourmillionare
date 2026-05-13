@@ -16,6 +16,8 @@ import { ValidationError } from '@ym/shared-errors';
 import { getPool } from '../../outbound/pg/pg-pool.client.js';
 import { buildSearchTaxLawTool } from '../../../application/tools/search-tax-law.tool.js';
 import { buildGetFilingDraftTool } from '../../../application/tools/get-filing-draft-detail.tool.js';
+import { buildComputePenaltyTool } from '../../../application/tools/compute-penalty-scenario.tool.js';
+import { buildCheckBenefitEligibilityTool } from '../../../application/tools/check-benefit-eligibility.tool.js';
 import {
   TAX_SCENARIOS,
   buildContext,
@@ -43,9 +45,9 @@ const decodeBody = (event: FunctionUrlEvent): string => {
 };
 
 const HEARTBEAT_INTERVAL_MS = 10_000;
-const FINAL_TEXT_MAX_LENGTH = 500;
-const MAX_AGENT_ITERATIONS = 8;
-const MAX_AGENT_TOKENS = 4096;
+const FINAL_TEXT_MAX_LENGTH = 1500;
+const MAX_AGENT_ITERATIONS = 12;
+const MAX_AGENT_TOKENS = 16_384;
 
 const handlerImpl = async (event: FunctionUrlEvent, responseStream: ResponseStream): Promise<void> => {
   const runId = randomUUID();
@@ -97,6 +99,8 @@ const handlerImpl = async (event: FunctionUrlEvent, responseStream: ResponseStre
   const tools: Tool[] = [
     buildSearchTaxLawTool(kbClient) as Tool,
     buildGetFilingDraftTool(getPool()) as Tool,
+    buildComputePenaltyTool() as Tool,
+    buildCheckBenefitEligibilityTool() as Tool,
   ];
 
   const heartbeat = setInterval(() => {

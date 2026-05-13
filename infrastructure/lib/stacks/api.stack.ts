@@ -50,7 +50,9 @@ const TAX_STRATEGY_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax/src/infrast
 const CODEF_SYNC_STREAM_LAMBDA_ENTRY = join(__dirname, '../../../apps/codef/src/infrastructure/inbound/streaming/fs-sync-stream.lambda.ts');
 const TAX_KNOWLEDGE_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax-knowledge/src/infrastructure/inbound/http/tax-knowledge.lambda.ts');
 const API_NOT_FOUND_LAMBDA_ENTRY = join(__dirname, '../lambdas/api-not-found.lambda.ts');
-const BEDROCK_PROFILE_ID = 'global.anthropic.claude-sonnet-4-6';
+// Sonnet 4.6 for cheap deterministic work (transaction classification). Opus 4.7 for advisory/reasoning agents.
+const BEDROCK_CLASSIFIER_MODEL_ID = 'global.anthropic.claude-sonnet-4-6';
+const BEDROCK_STRATEGY_MODEL_ID = 'global.anthropic.claude-opus-4-7';
 const RERANK_REGION_DEFAULT = 'ap-northeast-1';
 const RERANK_MODEL_DEFAULT = 'cohere.rerank-v3-5:0';
 const EMBED_MODEL_DEFAULT = 'amazon.titan-embed-text-v2:0';
@@ -156,7 +158,7 @@ export class ApiStack extends Stack {
         DATABASE_NAME: 'yourmillionare',
         APP_REGION: region,
         LOG_LEVEL: isProd ? 'info' : 'debug',
-        BEDROCK_MODEL_ID: BEDROCK_PROFILE_ID,
+        BEDROCK_MODEL_ID: BEDROCK_CLASSIFIER_MODEL_ID,
         BEDROCK_DAILY_LIMIT_PER_USER: '100',
         COST_COUNTER_TABLE_NAME: props.cache.costCounter.tableName,
         IDEMPOTENCY_TABLE_NAME: props.cache.idempotencyKeys.tableName,
@@ -180,7 +182,7 @@ export class ApiStack extends Stack {
       new PolicyStatement({
         actions: ['bedrock:InvokeModel', 'bedrock:Converse'],
         resources: [
-          `arn:aws:bedrock:${region}:${account}:inference-profile/${BEDROCK_PROFILE_ID}`,
+          `arn:aws:bedrock:${region}:${account}:inference-profile/${BEDROCK_CLASSIFIER_MODEL_ID}`,
           'arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6',
         ],
       }),
@@ -265,7 +267,7 @@ export class ApiStack extends Stack {
       runtime: Runtime.NODEJS_20_X,
       architecture: Architecture.ARM_64,
       memorySize: 512,
-      timeout: Duration.minutes(3),
+      timeout: Duration.minutes(10),
       vpc: props.vpc,
       vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
       securityGroups: [props.lambdaSg],
@@ -282,7 +284,7 @@ export class ApiStack extends Stack {
         BEDROCK_RERANK_REGION: rerankRegionForStrategy,
         BEDROCK_RERANK_MODEL: rerankModelForStrategy,
         BEDROCK_EMBED_MODEL: embedModelForStrategy,
-        BEDROCK_MODEL_ID: BEDROCK_PROFILE_ID,
+        BEDROCK_MODEL_ID: BEDROCK_STRATEGY_MODEL_ID,
         AWS_ACCOUNT_ID: account,
       },
       bundling: {
@@ -340,7 +342,7 @@ export class ApiStack extends Stack {
         LOG_LEVEL: isProd ? 'info' : 'debug',
         COGNITO_USER_POOL_ID: props.identity.userPool.userPoolId,
         COGNITO_USER_POOL_CLIENT_ID: props.identity.userPoolClient.userPoolClientId,
-        BEDROCK_MODEL_ID: BEDROCK_PROFILE_ID,
+        BEDROCK_MODEL_ID: BEDROCK_CLASSIFIER_MODEL_ID,
         TRANSACTION_CACHE_TABLE_NAME: props.cache.transactionCache.tableName,
         CODEF_SECRET_ARN: props.codefSecret.secretArn,
       },
@@ -359,7 +361,7 @@ export class ApiStack extends Stack {
       new PolicyStatement({
         actions: ['bedrock:InvokeModel', 'bedrock:Converse'],
         resources: [
-          `arn:aws:bedrock:${region}:${account}:inference-profile/${BEDROCK_PROFILE_ID}`,
+          `arn:aws:bedrock:${region}:${account}:inference-profile/${BEDROCK_CLASSIFIER_MODEL_ID}`,
           'arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6',
         ],
       }),
@@ -434,7 +436,7 @@ export class ApiStack extends Stack {
         BEDROCK_RERANK_REGION: rerankRegion,
         BEDROCK_RERANK_MODEL: rerankModel,
         BEDROCK_EMBED_MODEL: embedModel,
-        BEDROCK_MODEL_ID: BEDROCK_PROFILE_ID,
+        BEDROCK_MODEL_ID: BEDROCK_STRATEGY_MODEL_ID,
         ADMIN_COGNITO_GROUP: process.env.ADMIN_COGNITO_GROUP ?? 'ym-tax-admin',
         RERANK_DAILY_LIMIT_PER_USER: process.env.RERANK_DAILY_LIMIT_PER_USER ?? '20',
         LEGAL_SYNC_STATE_MACHINE_ARN: props.legalSyncStateMachineArn ?? process.env.LEGAL_SYNC_STATE_MACHINE_ARN ?? '',
@@ -462,7 +464,7 @@ export class ApiStack extends Stack {
         resources: [
           `arn:aws:bedrock:${kbRegion}::foundation-model/${embedModel}`,
           `arn:aws:bedrock:${rerankRegion}::foundation-model/${rerankModel}`,
-          `arn:aws:bedrock:${region}:${account}:inference-profile/${BEDROCK_PROFILE_ID}`,
+          `arn:aws:bedrock:${region}:${account}:inference-profile/${BEDROCK_STRATEGY_MODEL_ID}`,
         ],
       }),
     );
@@ -634,15 +636,23 @@ export class ApiStack extends Stack {
       });
     }
 
-    // --- Catch-all: turns API Gateway's bare 404 (no CORS headers) into a structured 404 with CORS headers + Function URL hints for moved routes. ---
+    // --- Catch-all: structured 404 + CORS hint for unmatched routes. Must NOT include OPTIONS — that would shadow API Gateway's automatic corsPreflight on every existing route and break browser preflight for the whole API. ---
+    const CATCH_ALL_METHODS = [
+      HttpMethod.GET,
+      HttpMethod.POST,
+      HttpMethod.PATCH,
+      HttpMethod.DELETE,
+      HttpMethod.PUT,
+      HttpMethod.HEAD,
+    ];
     this.httpApi.addRoutes({
       path: '/{proxy+}',
-      methods: [HttpMethod.ANY],
+      methods: CATCH_ALL_METHODS,
       integration: notFoundIntegration,
     });
     this.httpApi.addRoutes({
       path: '/',
-      methods: [HttpMethod.ANY],
+      methods: CATCH_ALL_METHODS,
       integration: notFoundIntegration,
     });
 
