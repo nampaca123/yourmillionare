@@ -147,6 +147,20 @@ describe('DataStack (dev)', () => {
     const errors = Annotations.fromStack(stack).findError('*', Match.stringLikeRegexp('AwsSolutions-.*'));
     expect(errors).toEqual([]);
   });
+
+  it('should create RDS Proxy alarms on key metrics', () => {
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'ConnectionBorrowLatency',
+      Threshold: 50,
+      EvaluationPeriods: 2,
+    });
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'DatabaseConnections',
+    });
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'ClientConnectionsBorrowingFromProxy',
+    });
+  });
 });
 
 describe('DataStack (prod)', () => {

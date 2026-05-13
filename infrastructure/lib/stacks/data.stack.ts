@@ -7,6 +7,8 @@ import { fileURLToPath } from 'url';
 
 import { CfnOutput, CustomResource, Duration, Stack } from 'aws-cdk-lib';
 import type { StackProps } from 'aws-cdk-lib';
+import { Alarm, ComparisonOperator, Metric, TreatMissingData } from 'aws-cdk-lib/aws-cloudwatch';
+import { SnsAction } from 'aws-cdk-lib/aws-cloudwatch-actions';
 import type { ISecurityGroup, IVpc } from 'aws-cdk-lib/aws-ec2';
 import { SubnetType } from 'aws-cdk-lib/aws-ec2';
 import type { IKey } from 'aws-cdk-lib/aws-kms';
@@ -14,6 +16,7 @@ import { HostedRotation } from 'aws-cdk-lib/aws-secretsmanager';
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
+import { Topic } from 'aws-cdk-lib/aws-sns';
 import { NagSuppressions } from 'cdk-nag';
 import { Provider } from 'aws-cdk-lib/custom-resources';
 import type { Construct } from 'constructs';
@@ -385,6 +388,61 @@ export class DataStack extends Stack {
       },
     ]);
 
+    // --- RDS Proxy alarms ---
+    const dataAlarmTopic = new Topic(this, 'DataAlarmTopic', {
+      topicName: `${this.stackName}-DataAlarmTopic`,
+      masterKey: props.sharedKey,
+    });
+
+    const proxyDims = { DBProxyName: aurora.proxy.dbProxyName ?? '' };
+
+    new Alarm(this, 'ProxyBorrowLatencyAlarm', {
+      alarmName: `${this.stackName}-ProxyBorrowLatency-p99-50ms`,
+      metric: new Metric({
+        namespace: 'AWS/RDS',
+        metricName: 'ConnectionBorrowLatency',
+        statistic: 'p99',
+        period: Duration.minutes(5),
+        dimensionsMap: proxyDims,
+      }),
+      threshold: 50,
+      evaluationPeriods: 2,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(new SnsAction(dataAlarmTopic));
+
+    const maxConnectionsAlarmThreshold = isProd ? 700 : 350;
+    new Alarm(this, 'ProxyDatabaseConnectionsAlarm', {
+      alarmName: `${this.stackName}-ProxyDatabaseConnections-80pct`,
+      metric: new Metric({
+        namespace: 'AWS/RDS',
+        metricName: 'DatabaseConnections',
+        statistic: 'Maximum',
+        period: Duration.minutes(5),
+        dimensionsMap: proxyDims,
+      }),
+      threshold: maxConnectionsAlarmThreshold,
+      evaluationPeriods: 1,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(new SnsAction(dataAlarmTopic));
+
+    const clientConnectionsAlarmThreshold = isProd ? 200 : 50;
+    new Alarm(this, 'ProxyClientConnectionsAlarm', {
+      alarmName: `${this.stackName}-ProxyClientConnections-spike`,
+      metric: new Metric({
+        namespace: 'AWS/RDS',
+        metricName: 'ClientConnectionsBorrowingFromProxy',
+        statistic: 'Average',
+        period: Duration.minutes(5),
+        dimensionsMap: proxyDims,
+      }),
+      threshold: clientConnectionsAlarmThreshold,
+      evaluationPeriods: 3,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(new SnsAction(dataAlarmTopic));
+
     // --- Outputs ---
     new CfnOutput(this, 'AuroraClusterArn', { value: aurora.cluster.clusterArn, exportName: `${id}-AuroraClusterArn` });
     new CfnOutput(this, 'AuroraEndpoint', { value: aurora.cluster.clusterEndpoint.hostname, exportName: `${id}-AuroraEndpoint` });
@@ -393,5 +451,7 @@ export class DataStack extends Stack {
     new CfnOutput(this, 'TransactionCacheArn', { value: this.cache.transactionCache.tableArn });
     new CfnOutput(this, 'IdempotencyKeysArn', { value: this.cache.idempotencyKeys.tableArn });
     new CfnOutput(this, 'CostCounterArn', { value: this.cache.costCounter.tableArn });
+    new CfnOutput(this, 'DataAlarmTopicArn', { value: dataAlarmTopic.topicArn });
+    new CfnOutput(this, 'ProxyEndpoint', { value: aurora.proxy.attrEndpoint });
   }
 }
