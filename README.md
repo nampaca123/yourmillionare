@@ -22,7 +22,7 @@ yourmillionare/
 │   ├── reports-core/         # K-IFRS builders (P&L, BS, CF, TB) with {certain, uncertain, total} breakdown
 │   ├── tax-core/             # Tax calculators
 │   └── tax-domain/           # Tax filing engine + Bedrock KB client
-├── docs/                     # Slice implementation reports, API_LIST.md, agent-architecture.md
+├── docs/                     # ARCHITECTURE.md, API_LIST.md, agent-architecture.md, slice reports
 ├── scripts/                  # sync-secrets, run-api-e2e, run-codef-e2e, run-agents-e2e, post-deploy-smoke
 ├── schema.sql                # Aurora PostgreSQL DDL — single source of truth (migrations 0001–0024)
 └── CLAUDE.md                 # Engineering guidelines
@@ -137,6 +137,10 @@ POST   /tenants/{id}/fx/strategy  (SSE Function URL)   — exposure_summary / co
 - **`discarded`** — 사용자가 폐기. row 는 audit 용으로 보존, 집계에서 제외
 
 별도 draft 테이블 없음. 재무제표(P&L, BS, CF, TB)도 certain/uncertain/total 로 분해해서 반환. 자세한 응답 형식은 `docs/API_LIST.md` 참조.
+
+## Architecture
+
+전체 아키텍처(6개 CDK 스택, 데이터 흐름, 부하 분산·스케일링 평가, RDS Proxy 부재 리스크 분석)는 `docs/ARCHITECTURE.md` 에 정리되어 있다.
 
 ## Agent Architecture
 
