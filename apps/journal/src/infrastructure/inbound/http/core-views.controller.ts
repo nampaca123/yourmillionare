@@ -7,7 +7,6 @@ import type { EnsureUserExistsUseCase } from '../../../application/ensure-user-e
 import type { GetMonthlySummaryUseCase } from '../../../application/get-monthly-summary.use-case.js';
 import type { GetReceivablesUseCase, UpdateReceivableStatusUseCase } from '../../../application/get-receivables.use-case.js';
 import type { GetAccountBalancesUseCase } from '../../../application/get-account-balances.use-case.js';
-import type { ListDraftsUseCase } from '../../../application/list-drafts.use-case.js';
 import { parseClaims } from './auth-claims.mapper.js';
 
 const YmSchema = z.object({ ym: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/) });
@@ -93,13 +92,3 @@ export const buildAccountBalancesController =
     return { statusCode: 200, body: JSON.stringify({ balances }) };
   };
 
-export const buildListDraftsController =
-  (ensureUser: EnsureUserExistsUseCase, useCase: ListDraftsUseCase) =>
-  async (event: APIGatewayProxyEventV2WithJWTAuthorizer): Promise<APIGatewayProxyResultV2> => {
-    const claims = parseClaims(event.requestContext.authorizer.jwt.claims);
-    const user = await ensureUser.execute({ cognitoSub: claims.cognitoSub, email: claims.email });
-    const tenantId = event.pathParameters?.tenantId ?? '';
-
-    const drafts = await useCase.execute({ tenantId, userId: user.id, cognitoSub: claims.cognitoSub });
-    return { statusCode: 200, body: JSON.stringify({ drafts }) };
-  };

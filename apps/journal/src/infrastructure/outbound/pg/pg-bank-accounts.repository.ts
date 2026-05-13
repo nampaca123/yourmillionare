@@ -53,10 +53,11 @@ export const listAccountBalances = async (tenantId: string): Promise<ReadonlyArr
   });
 };
 
-export const countPendingDrafts = async (tenantId: string): Promise<number> => {
+export const countUncertainEntries = async (tenantId: string): Promise<number> => {
   return withRlsContext({ tenantId, cognitoSub: 'system' }, async (client) => {
     const result = await client.query<{ n: string }>(
-      `SELECT COUNT(*)::text AS n FROM journal_entry_draft WHERE tenant_id = $1`,
+      `SELECT COUNT(*)::text AS n FROM journal_entries
+        WHERE tenant_id = $1 AND confidence_status = 'uncertain'`,
       [tenantId],
     );
     return Number.parseInt(result.rows[0]?.n ?? '0', 10);

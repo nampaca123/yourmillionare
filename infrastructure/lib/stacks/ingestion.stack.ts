@@ -12,6 +12,7 @@ import { SubnetType } from 'aws-cdk-lib/aws-ec2';
 import { Rule, Schedule } from 'aws-cdk-lib/aws-events';
 import { LambdaFunction, SfnStateMachine } from 'aws-cdk-lib/aws-events-targets';
 import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
+import type { IKey } from 'aws-cdk-lib/aws-kms';
 import { BlockPublicAccess, Bucket, BucketEncryption } from 'aws-cdk-lib/aws-s3';
 import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
@@ -47,12 +48,13 @@ export interface IngestionStackProps extends StackProps {
   readonly lambdaSg: ISecurityGroup;
   readonly aurora: AuroraConstruct;
   readonly codefSecretArn: string;
+  readonly ecosSecretArn: string;
+  readonly sharedKey: IKey;
   readonly transactionCache: ITable;
   readonly bedrockEmbedModel: string;
 }
 
 export class IngestionStack extends Stack {
-  public readonly manualSyncStateMachineArn: string;
   public readonly legalSyncStateMachineArn: string;
   public readonly legalKbId: string;
   public readonly legalKbDataSourceId: string;
@@ -66,6 +68,7 @@ export class IngestionStack extends Stack {
     const account = Stack.of(this).account;
 
     const codefSecret = Secret.fromSecretCompleteArn(this, 'CodefSecretRef', props.codefSecretArn);
+    const ecosSecret = Secret.fromSecretCompleteArn(this, 'EcosSecretRef', props.ecosSecretArn);
 
     const classifyDlq = new Queue(this, 'ClassifyDLQ', {
       retentionPeriod: Duration.days(14),
@@ -194,12 +197,17 @@ export class IngestionStack extends Stack {
       runtime: Runtime.NODEJS_20_X,
       architecture: Architecture.ARM_64,
       memorySize: 256,
-      timeout: Duration.seconds(30),
+      timeout: Duration.seconds(60),
+      ...commonVpcConfig,
       environment: {
-        LOG_LEVEL: isProd ? 'info' : 'debug',
+        ...commonEnv,
+        ECOS_CREDENTIAL_SECRET_ARN: ecosSecret.secretArn,
       },
-      bundling: { externalModules: ['@aws-sdk/*'] },
+      bundling: commonBundling,
     });
+    fxCollectorFn.addToRolePolicy(rdsConnectPolicy);
+    ecosSecret.grantRead(fxCollectorFn);
+    props.sharedKey.grantDecrypt(fxCollectorFn);
 
     // --- Legal KB S3 bucket: stores raw OPEN_LAW responses + Bedrock KB chunk objects. ---
     const legalKbBucket = new Bucket(this, 'LegalKbBucket', {
@@ -346,8 +354,11 @@ export class IngestionStack extends Stack {
         },
         {
           id: 'AwsSolutions-IAM4',
-          reason: 'AWSLambdaBasicExecutionRole is required for managed logging per AWS Lambda baseline.',
-          appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'],
+          reason: 'AWS-managed Lambda execution policies are required for managed logging and VPC ENI lifecycle per AWS Lambda baseline.',
+          appliesTo: [
+            'Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole',
+            'Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole',
+          ],
         },
       ],
       true,
@@ -402,25 +413,7 @@ export class IngestionStack extends Stack {
       schedule: Schedule.rate(Duration.hours(1)),
     }).addTarget(new LambdaFunction(fxCollectorFn));
 
-    // --- ManualSyncStateMachine: single-tenant fetch invoked from POST /tenants/{id}/sync ---
-    const manualFetchTask = new tasks.LambdaInvoke(this, 'ManualFetchTenant', {
-      lambdaFunction: codefFetchFn,
-      payload: sfn.TaskInput.fromObject({
-        tenantId: sfn.JsonPath.stringAt('$.tenantId'),
-        syncRunId: sfn.JsonPath.stringAt('$.syncRunId'),
-      }),
-      payloadResponseOnly: true,
-    });
-    const manualSyncSm = new sfn.StateMachine(this, 'ManualSyncStateMachine', {
-      definitionBody: sfn.DefinitionBody.fromChainable(manualFetchTask),
-      tracingEnabled: true,
-    });
-    this.manualSyncStateMachineArn = manualSyncSm.stateMachineArn;
-    new CfnOutput(this, 'ManualSyncStateMachineArn', {
-      value: manualSyncSm.stateMachineArn,
-      description: 'ARN of the per-tenant manual sync Step Functions state machine. Wired into Journal Lambda env.',
-      exportName: `${id}-ManualSyncStateMachineArn`,
-    });
+    // Manual /fs/sync is served via the SSE Function URL (CodefSyncStreamFn in ApiStack) — no Step Functions involved.
 
     // --- Bedrock Knowledge Base over the legal corpus (S3 Vectors backend, Cohere embed-v4 in Seoul) ---
     const isProdEnv = props.deploymentEnv === 'prod';
@@ -490,14 +483,10 @@ export class IngestionStack extends Stack {
     }).addTarget(new SfnStateMachine(legalSyncSm));
 
     NagSuppressions.addResourceSuppressions(
-      manualSyncSm,
-      [{ id: 'AwsSolutions-SF1', reason: 'SFN CloudWatch Logs integration deferred to Slice 6 observability hardening.' }],
-    );
-    NagSuppressions.addResourceSuppressions(
       legalSyncSm,
       [{ id: 'AwsSolutions-SF1', reason: 'SFN CloudWatch Logs integration deferred; stub state machine.' }],
     );
-    for (const sm of [manualSyncSm, legalSyncSm]) {
+    for (const sm of [legalSyncSm]) {
       const policy = sm.role.node.tryFindChild('DefaultPolicy');
       if (policy) {
         NagSuppressions.addResourceSuppressions(policy, [

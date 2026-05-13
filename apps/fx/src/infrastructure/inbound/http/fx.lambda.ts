@@ -1,7 +1,7 @@
 // Lambda entry point: dispatches FX HTTP requests to controllers by routeKey.
 
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { container } from '../../../main.js';
+import { getContainer } from '../../../main.js';
 import { toHttpErrorResponse } from '@ym/shared-errors';
 import { logger } from '../../../shared/logging/logger.js';
 
@@ -13,7 +13,8 @@ export const handler = async (
   const log = logger.child({ requestId, path });
 
   try {
-    const routeHandler = container.routes[event.routeKey];
+    const { routes } = await getContainer();
+    const routeHandler = routes[event.routeKey];
     if (!routeHandler) {
       return {
         statusCode: 404,

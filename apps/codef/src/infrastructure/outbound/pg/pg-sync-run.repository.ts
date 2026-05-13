@@ -44,11 +44,14 @@ export interface SyncRunAccountRow {
 export interface CreateSyncRunInput {
   tenantId: string;
   triggeredBy: 'manual' | 'schedule';
+  dateRangeFrom?: string | null;
+  dateRangeTo?: string | null;
 }
 
 export interface RecordAccountOutcomeInput {
   syncRunId: string;
   tenantId: string;
+  bankAccountId: string | null;
   organization: string;
   accountNumber: string | null;
   outcome: SyncRunAccountOutcome;
@@ -57,6 +60,8 @@ export interface RecordAccountOutcomeInput {
   userMessage?: string | null;
   fetchedCount?: number;
   balanceUpdated?: boolean;
+  previousBalance?: number | null;
+  currentBalance?: number | null;
 }
 
 export interface CompleteSyncRunInput {
@@ -130,10 +135,10 @@ const mapSyncRunAccount = (row: SyncRunAccountDbRow): SyncRunAccountRow => ({
 
 export const createSyncRun = async (client: PoolClient, input: CreateSyncRunInput): Promise<string> => {
   const result = await client.query<{ id: string }>(
-    `INSERT INTO sync_run (tenant_id, triggered_by, status)
-     VALUES ($1, $2, 'queued')
+    `INSERT INTO sync_run (tenant_id, triggered_by, status, date_range_from, date_range_to)
+     VALUES ($1, $2, 'queued', $3, $4)
      RETURNING id`,
-    [input.tenantId, input.triggeredBy],
+    [input.tenantId, input.triggeredBy, input.dateRangeFrom ?? null, input.dateRangeTo ?? null],
   );
   const id = result.rows[0]?.id;
   if (!id) {
@@ -200,12 +205,14 @@ export const recordAccountOutcome = async (
 ): Promise<void> => {
   await client.query(
     `INSERT INTO sync_run_account
-       (sync_run_id, tenant_id, organization, account_number, outcome,
-        codef_error_code, codef_error_message, user_message, fetched_count, balance_updated)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+       (sync_run_id, tenant_id, bank_account_id, organization, account_number, outcome,
+        codef_error_code, codef_error_message, user_message, fetched_count, balance_updated,
+        previous_balance, current_balance)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
     [
       input.syncRunId,
       input.tenantId,
+      input.bankAccountId,
       input.organization,
       input.accountNumber,
       input.outcome,
@@ -214,6 +221,8 @@ export const recordAccountOutcome = async (
       input.userMessage ?? null,
       input.fetchedCount ?? 0,
       input.balanceUpdated ?? false,
+      input.previousBalance ?? null,
+      input.currentBalance ?? null,
     ],
   );
 };

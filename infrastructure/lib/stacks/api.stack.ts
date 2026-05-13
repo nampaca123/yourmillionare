@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 
 import { CfnOutput, Duration, Stack } from 'aws-cdk-lib';
 import type { StackProps } from 'aws-cdk-lib';
-import { CorsHttpMethod, HttpApi, HttpMethod } from 'aws-cdk-lib/aws-apigatewayv2';
+import { HttpApi, HttpMethod } from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpJwtAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import type { ISecurityGroup, IVpc } from 'aws-cdk-lib/aws-ec2';
@@ -13,7 +13,8 @@ import { SubnetType } from 'aws-cdk-lib/aws-ec2';
 import type { IKey } from 'aws-cdk-lib/aws-kms';
 import { Key, KeySpec, KeyUsage } from 'aws-cdk-lib/aws-kms';
 import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
-import { Architecture, FunctionUrlAuthType, HttpMethod as LambdaHttpMethod, InvokeMode, Runtime } from 'aws-cdk-lib/aws-lambda';
+import { Architecture, FunctionUrlAuthType, InvokeMode, Runtime } from 'aws-cdk-lib/aws-lambda';
+import { buildApiGwCors, buildFunctionUrlCors } from '../config/cors.config.js';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
 import type { ISecret } from 'aws-cdk-lib/aws-secretsmanager';
@@ -34,7 +35,7 @@ export interface ApiStackProps extends StackProps {
   readonly identity: IdentityStack;
   readonly sharedKey: IKey;
   readonly codefSecret: ISecret;
-  readonly manualSyncStateMachineArn?: string;
+  readonly ecosSecret: ISecret;
   readonly legalSyncStateMachineArn?: string;
   readonly legalKbId?: string;
   readonly filingGeneratorFnArn?: string;
@@ -45,10 +46,15 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const IDENTITY_LAMBDA_ENTRY = join(__dirname, '../../../apps/identity/src/infrastructure/inbound/http/identity.lambda.ts');
 const JOURNAL_LAMBDA_ENTRY = join(__dirname, '../../../apps/journal/src/infrastructure/inbound/http/journal.lambda.ts');
 const FX_LAMBDA_ENTRY = join(__dirname, '../../../apps/fx/src/infrastructure/inbound/http/fx.lambda.ts');
+const FX_STRATEGY_LAMBDA_ENTRY = join(__dirname, '../../../apps/fx/src/infrastructure/inbound/streaming/fx-strategy.lambda.ts');
 const TAX_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax/src/infrastructure/inbound/http/tax.lambda.ts');
 const TAX_STRATEGY_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax/src/infrastructure/inbound/streaming/tax-strategy.lambda.ts');
+const CODEF_SYNC_STREAM_LAMBDA_ENTRY = join(__dirname, '../../../apps/codef/src/infrastructure/inbound/streaming/fs-sync-stream.lambda.ts');
 const TAX_KNOWLEDGE_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax-knowledge/src/infrastructure/inbound/http/tax-knowledge.lambda.ts');
-const BEDROCK_PROFILE_ID = 'global.anthropic.claude-sonnet-4-6';
+const API_NOT_FOUND_LAMBDA_ENTRY = join(__dirname, '../lambdas/api-not-found.lambda.ts');
+// Sonnet 4.6 for cheap deterministic work (transaction classification). Opus 4.6 for advisory/reasoning agents (Opus 4.7 model access not yet granted on this AWS account; revisit once approved).
+const BEDROCK_CLASSIFIER_MODEL_ID = 'global.anthropic.claude-sonnet-4-6';
+const BEDROCK_STRATEGY_MODEL_ID = 'global.anthropic.claude-opus-4-6-v1';
 const RERANK_REGION_DEFAULT = 'ap-northeast-1';
 const RERANK_MODEL_DEFAULT = 'cohere.rerank-v3-5:0';
 const EMBED_MODEL_DEFAULT = 'amazon.titan-embed-text-v2:0';
@@ -154,12 +160,11 @@ export class ApiStack extends Stack {
         DATABASE_NAME: 'yourmillionare',
         APP_REGION: region,
         LOG_LEVEL: isProd ? 'info' : 'debug',
-        BEDROCK_MODEL_ID: BEDROCK_PROFILE_ID,
+        BEDROCK_MODEL_ID: BEDROCK_CLASSIFIER_MODEL_ID,
         BEDROCK_DAILY_LIMIT_PER_USER: '100',
         COST_COUNTER_TABLE_NAME: props.cache.costCounter.tableName,
         IDEMPOTENCY_TABLE_NAME: props.cache.idempotencyKeys.tableName,
         TRANSACTION_CACHE_TABLE_NAME: props.cache.transactionCache.tableName,
-        MANUAL_SYNC_STATE_MACHINE_ARN: props.manualSyncStateMachineArn ?? '',
       },
       bundling: {
         externalModules: ['@aws-sdk/*', 'pg-native'],
@@ -179,15 +184,9 @@ export class ApiStack extends Stack {
       new PolicyStatement({
         actions: ['bedrock:InvokeModel', 'bedrock:Converse'],
         resources: [
-          `arn:aws:bedrock:${region}:${account}:inference-profile/${BEDROCK_PROFILE_ID}`,
+          `arn:aws:bedrock:${region}:${account}:inference-profile/${BEDROCK_CLASSIFIER_MODEL_ID}`,
           'arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6',
         ],
-      }),
-    );
-    journalFn.addToRolePolicy(
-      new PolicyStatement({
-        actions: ['states:StartExecution', 'states:DescribeExecution'],
-        resources: [`arn:aws:states:${region}:${account}:stateMachine:*`],
       }),
     );
     props.cache.costCounter.grantReadWriteData(journalFn);
@@ -211,7 +210,7 @@ export class ApiStack extends Stack {
         DATABASE_NAME: 'yourmillionare',
         APP_REGION: region,
         LOG_LEVEL: isProd ? 'info' : 'debug',
-        ECOS_API_KEY: process.env.ECOS_API_KEY ?? '',
+        ECOS_CREDENTIAL_SECRET_ARN: props.ecosSecret.secretArn,
       },
       bundling: {
         externalModules: ['@aws-sdk/*', 'pg-native'],
@@ -224,6 +223,7 @@ export class ApiStack extends Stack {
         resources: [`arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`],
       }),
     );
+    props.ecosSecret.grantRead(fxFn);
 
     // --- Tax Lambda (HTTP) ---
     const taxFn = new NodejsFunction(this, 'TaxFn', {
@@ -256,10 +256,8 @@ export class ApiStack extends Stack {
       }),
     );
 
-    const corsAllowedOrigins = (process.env.API_CORS_ALLOWED_ORIGINS ?? 'http://localhost:3000,http://localhost:5173')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const apiGwCors = buildApiGwCors({ stage: props.deploymentEnv });
+    const functionUrlCors = buildFunctionUrlCors({ stage: props.deploymentEnv });
 
     // --- Tax-Strategy SSE Lambda (Function URL with response streaming, Bedrock Converse + KB tools) ---
     const kbRegionForStrategy = process.env.BEDROCK_KB_REGION ?? region;
@@ -272,7 +270,7 @@ export class ApiStack extends Stack {
       runtime: Runtime.NODEJS_20_X,
       architecture: Architecture.ARM_64,
       memorySize: 512,
-      timeout: Duration.minutes(3),
+      timeout: Duration.minutes(10),
       vpc: props.vpc,
       vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
       securityGroups: [props.lambdaSg],
@@ -289,7 +287,7 @@ export class ApiStack extends Stack {
         BEDROCK_RERANK_REGION: rerankRegionForStrategy,
         BEDROCK_RERANK_MODEL: rerankModelForStrategy,
         BEDROCK_EMBED_MODEL: embedModelForStrategy,
-        BEDROCK_MODEL_ID: BEDROCK_PROFILE_ID,
+        BEDROCK_MODEL_ID: BEDROCK_STRATEGY_MODEL_ID,
         AWS_ACCOUNT_ID: account,
       },
       bundling: {
@@ -320,18 +318,154 @@ export class ApiStack extends Stack {
     const taxStrategyFnUrl = taxStrategyFn.addFunctionUrl({
       authType: FunctionUrlAuthType.NONE,
       invokeMode: InvokeMode.RESPONSE_STREAM,
-      cors: {
-        allowedOrigins: corsAllowedOrigins,
-        allowedMethods: [LambdaHttpMethod.POST],
-        allowedHeaders: ['authorization', 'content-type', 'idempotency-key'],
-        maxAge: Duration.hours(1),
-      },
+      cors: functionUrlCors,
     });
     new CfnOutput(this, 'TaxStrategyFnUrl', {
       value: taxStrategyFnUrl.url,
       description: 'Function URL for tax/strategy SSE endpoint (Bearer JWT in Authorization header).',
       exportName: `${id}-TaxStrategyFnUrl`,
     });
+
+    // --- FX-Strategy SSE Lambda (Function URL with response streaming, Bedrock Converse + get_extended_rate_history tool) ---
+    const fxStrategyFn = new NodejsFunction(this, 'FxStrategyFn', {
+      entry: FX_STRATEGY_LAMBDA_ENTRY,
+      handler: 'handler',
+      runtime: Runtime.NODEJS_20_X,
+      architecture: Architecture.ARM_64,
+      memorySize: 512,
+      timeout: Duration.minutes(10),
+      vpc: props.vpc,
+      vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [props.lambdaSg],
+      environment: {
+        CLUSTER_ENDPOINT: props.aurora.cluster.clusterEndpoint.hostname,
+        CLUSTER_PORT: '5432',
+        DATABASE_NAME: 'yourmillionare',
+        APP_REGION: region,
+        LOG_LEVEL: isProd ? 'info' : 'debug',
+        COGNITO_USER_POOL_ID: props.identity.userPool.userPoolId,
+        COGNITO_USER_POOL_CLIENT_ID: props.identity.userPoolClient.userPoolClientId,
+        BEDROCK_MODEL_ID: BEDROCK_STRATEGY_MODEL_ID,
+        AWS_ACCOUNT_ID: account,
+      },
+      bundling: {
+        externalModules: ['@aws-sdk/*', 'pg-native'],
+        nodeModules: ['pg'],
+      },
+    });
+    fxStrategyFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['rds-db:connect'],
+        resources: [`arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`],
+      }),
+    );
+    fxStrategyFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: [
+          'bedrock:InvokeModel',
+          'bedrock:Converse',
+          'bedrock:ConverseStream',
+          'bedrock:GetInferenceProfile',
+        ],
+        resources: ['*'],
+      }),
+    );
+    const fxStrategyFnUrl = fxStrategyFn.addFunctionUrl({
+      authType: FunctionUrlAuthType.NONE,
+      invokeMode: InvokeMode.RESPONSE_STREAM,
+      cors: functionUrlCors,
+    });
+    new CfnOutput(this, 'FxStrategyFnUrl', {
+      value: fxStrategyFnUrl.url,
+      description: 'Function URL for fx/strategy SSE endpoint (Bearer JWT in Authorization header).',
+      exportName: `${id}-FxStrategyFnUrl`,
+    });
+
+    // --- Codef-Sync SSE Lambda (Function URL with response streaming, inline CODEF fetch + Bedrock classification) ---
+    const codefSyncStreamFn = new NodejsFunction(this, 'CodefSyncStreamFn', {
+      entry: CODEF_SYNC_STREAM_LAMBDA_ENTRY,
+      handler: 'handler',
+      runtime: Runtime.NODEJS_20_X,
+      architecture: Architecture.ARM_64,
+      memorySize: 1024,
+      timeout: Duration.minutes(14),
+      vpc: props.vpc,
+      vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [props.lambdaSg],
+      environment: {
+        CLUSTER_ENDPOINT: props.aurora.cluster.clusterEndpoint.hostname,
+        CLUSTER_PORT: '5432',
+        DATABASE_NAME: 'yourmillionare',
+        APP_REGION: region,
+        LOG_LEVEL: isProd ? 'info' : 'debug',
+        COGNITO_USER_POOL_ID: props.identity.userPool.userPoolId,
+        COGNITO_USER_POOL_CLIENT_ID: props.identity.userPoolClient.userPoolClientId,
+        BEDROCK_MODEL_ID: BEDROCK_CLASSIFIER_MODEL_ID,
+        TRANSACTION_CACHE_TABLE_NAME: props.cache.transactionCache.tableName,
+        CODEF_SECRET_ARN: props.codefSecret.secretArn,
+      },
+      bundling: {
+        externalModules: ['@aws-sdk/*', 'pg-native'],
+        nodeModules: ['pg'],
+      },
+    });
+    codefSyncStreamFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['rds-db:connect'],
+        resources: [`arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`],
+      }),
+    );
+    codefSyncStreamFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['bedrock:InvokeModel', 'bedrock:Converse'],
+        resources: [
+          `arn:aws:bedrock:${region}:${account}:inference-profile/${BEDROCK_CLASSIFIER_MODEL_ID}`,
+          'arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6',
+        ],
+      }),
+    );
+    props.codefSecret.grantRead(codefSyncStreamFn);
+    props.cache.transactionCache.grantReadWriteData(codefSyncStreamFn);
+
+    const codefSyncStreamFnUrl = codefSyncStreamFn.addFunctionUrl({
+      authType: FunctionUrlAuthType.NONE,
+      invokeMode: InvokeMode.RESPONSE_STREAM,
+      cors: functionUrlCors,
+    });
+    new CfnOutput(this, 'CodefSyncStreamFnUrl', {
+      value: codefSyncStreamFnUrl.url,
+      description: 'Function URL for POST /tenants/{tenantId}/fs/sync SSE endpoint (Bearer JWT in Authorization header).',
+      exportName: `${id}-CodefSyncStreamFnUrl`,
+    });
+
+    NagSuppressions.addResourceSuppressions(
+      codefSyncStreamFn,
+      [
+        { id: 'AwsSolutions-L1', reason: 'NODEJS_20_X is current LTS; 22_X adoption deferred' },
+        {
+          id: 'AwsSolutions-IAM4',
+          reason: 'AWSLambdaVPCAccessExecutionRole + AWSLambdaBasicExecutionRole required for VPC Lambda',
+          appliesTo: [
+            'Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole',
+            'Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole',
+          ],
+        },
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'rds-db:connect scoped to app_user; bedrock foundation-model wildcard required for cross-region inference profile',
+          appliesTo: [
+            'Resource::*',
+            'Resource::arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6',
+          ],
+        },
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'kms:ReEncrypt*/kms:GenerateDataKey* added by CDK grantReadWriteData for DynamoDB CMK',
+          appliesTo: ['Action::kms:ReEncrypt*', 'Action::kms:GenerateDataKey*'],
+        },
+      ],
+      true,
+    );
 
     // --- Tax-Knowledge Lambda (Bedrock KB + AgentCore-style tools + admin) ---
     const kbRegion = process.env.BEDROCK_KB_REGION ?? region;
@@ -360,7 +494,7 @@ export class ApiStack extends Stack {
         BEDROCK_RERANK_REGION: rerankRegion,
         BEDROCK_RERANK_MODEL: rerankModel,
         BEDROCK_EMBED_MODEL: embedModel,
-        BEDROCK_MODEL_ID: BEDROCK_PROFILE_ID,
+        BEDROCK_MODEL_ID: BEDROCK_STRATEGY_MODEL_ID,
         ADMIN_COGNITO_GROUP: process.env.ADMIN_COGNITO_GROUP ?? 'ym-tax-admin',
         RERANK_DAILY_LIMIT_PER_USER: process.env.RERANK_DAILY_LIMIT_PER_USER ?? '20',
         LEGAL_SYNC_STATE_MACHINE_ARN: props.legalSyncStateMachineArn ?? process.env.LEGAL_SYNC_STATE_MACHINE_ARN ?? '',
@@ -388,7 +522,7 @@ export class ApiStack extends Stack {
         resources: [
           `arn:aws:bedrock:${kbRegion}::foundation-model/${embedModel}`,
           `arn:aws:bedrock:${rerankRegion}::foundation-model/${rerankModel}`,
-          `arn:aws:bedrock:${region}:${account}:inference-profile/${BEDROCK_PROFILE_ID}`,
+          `arn:aws:bedrock:${region}:${account}:inference-profile/${BEDROCK_STRATEGY_MODEL_ID}`,
         ],
       }),
     );
@@ -407,18 +541,7 @@ export class ApiStack extends Stack {
 
     this.httpApi = new HttpApi(this, 'HttpApi', {
       createDefaultStage: true,
-      corsPreflight: {
-        allowOrigins: corsAllowedOrigins,
-        allowMethods: [
-          CorsHttpMethod.GET,
-          CorsHttpMethod.POST,
-          CorsHttpMethod.PATCH,
-          CorsHttpMethod.OPTIONS,
-        ],
-        allowHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key'],
-        allowCredentials: false,
-        maxAge: Duration.minutes(10),
-      },
+      corsPreflight: apiGwCors,
     });
 
     // Attach access logs to the default stage (stable CDK pattern)
@@ -438,6 +561,25 @@ export class ApiStack extends Stack {
         },
       });
     }
+
+    // --- Not-Found catch-all (gives unmatched routes a 404 with CORS headers; otherwise API GW emits 404 without CORS and the browser surfaces it as a CORS error). ---
+    const apiNotFoundFn = new NodejsFunction(this, 'ApiNotFoundFn', {
+      entry: API_NOT_FOUND_LAMBDA_ENTRY,
+      handler: 'handler',
+      runtime: Runtime.NODEJS_20_X,
+      architecture: Architecture.ARM_64,
+      memorySize: 128,
+      timeout: Duration.seconds(5),
+      environment: {
+        CODEF_SYNC_STREAM_FN_URL: codefSyncStreamFnUrl.url,
+        TAX_STRATEGY_FN_URL: taxStrategyFnUrl.url,
+        FX_STRATEGY_FN_URL: fxStrategyFnUrl.url,
+      },
+      bundling: {
+        externalModules: ['@aws-sdk/*'],
+      },
+    });
+    const notFoundIntegration = new HttpLambdaIntegration('NotFoundIntegration', apiNotFoundFn);
 
     const identityIntegration = new HttpLambdaIntegration('IdentityIntegration', identityFn);
     const journalIntegration = new HttpLambdaIntegration('JournalIntegration', journalFn);
@@ -475,18 +617,14 @@ export class ApiStack extends Stack {
       });
     }
 
-    // Journal authenticated routes (path-scoped per tenant) — original 3 + 12 new for sync, views, drafts, reports
+    // Journal authenticated routes (path-scoped per tenant). POST /fs/sync moved to SSE Function URL (CodefSyncStreamFn).
     for (const [method, path] of [
       [HttpMethod.POST, '/tenants/{tenantId}/journal/classify'],
       [HttpMethod.POST, '/tenants/{tenantId}/journal/entries'],
-      [HttpMethod.GET, '/tenants/{tenantId}/journal/entries'],
-      [HttpMethod.GET, '/tenants/{tenantId}/journal/drafts'],
-      [HttpMethod.POST, '/tenants/{tenantId}/journal/drafts/{rawTransactionId}/accept'],
-      [HttpMethod.POST, '/tenants/{tenantId}/fs/sync'],
-      [HttpMethod.GET, '/tenants/{tenantId}/fs/sync/status'],
-      [HttpMethod.GET, '/tenants/{tenantId}/fs/sync/runs'],
-      [HttpMethod.GET, '/tenants/{tenantId}/fs/sync/runs/latest'],
-      [HttpMethod.GET, '/tenants/{tenantId}/fs/sync/runs/{syncRunId}'],
+      [HttpMethod.GET,  '/tenants/{tenantId}/entries'],
+      [HttpMethod.PATCH, '/tenants/{tenantId}/entries/{entryId}'],
+      [HttpMethod.POST, '/tenants/{tenantId}/entries/{entryId}/confirm'],
+      [HttpMethod.POST, '/tenants/{tenantId}/entries/{entryId}/discard'],
       [HttpMethod.GET, '/tenants/{tenantId}/summary/monthly'],
       [HttpMethod.GET, '/tenants/{tenantId}/receivables'],
       [HttpMethod.PATCH, '/tenants/{tenantId}/receivables/{entryId}'],
@@ -508,6 +646,10 @@ export class ApiStack extends Stack {
     for (const [method, path] of [
       [HttpMethod.GET, '/fx/rates/usd-krw'],
       [HttpMethod.POST, '/tenants/{tenantId}/fx/revalue'],
+      [HttpMethod.POST, '/tenants/{tenantId}/fx/accounts'],
+      [HttpMethod.GET, '/tenants/{tenantId}/fx/accounts'],
+      [HttpMethod.PATCH, '/tenants/{tenantId}/fx/accounts/{accountId}/balance'],
+      [HttpMethod.DELETE, '/tenants/{tenantId}/fx/accounts/{accountId}'],
     ] as [HttpMethod, string][]) {
       this.httpApi.addRoutes({
         path,
@@ -537,10 +679,8 @@ export class ApiStack extends Stack {
       });
     }
 
-    // Tax-Knowledge routes (AgentCore-style tools + admin)
+    // Tax-Knowledge routes (admin only — agent-* tool endpoints moved into apps/tax via PR4.5)
     for (const [method, path] of [
-      [HttpMethod.POST, '/tenants/{tenantId}/agent/search-tax-law'],
-      [HttpMethod.POST, '/tenants/{tenantId}/agent/find-benefits'],
       [HttpMethod.GET, '/admin/tax-rules'],
       [HttpMethod.POST, '/admin/tax-rules/{id}/approve'],
       [HttpMethod.GET, '/admin/tax-rules/{id}/change-log'],
@@ -556,6 +696,26 @@ export class ApiStack extends Stack {
         authorizer: jwtAuthorizer,
       });
     }
+
+    // --- Catch-all: structured 404 + CORS hint for unmatched routes. Must NOT include OPTIONS — that would shadow API Gateway's automatic corsPreflight on every existing route and break browser preflight for the whole API. ---
+    const CATCH_ALL_METHODS = [
+      HttpMethod.GET,
+      HttpMethod.POST,
+      HttpMethod.PATCH,
+      HttpMethod.DELETE,
+      HttpMethod.PUT,
+      HttpMethod.HEAD,
+    ];
+    this.httpApi.addRoutes({
+      path: '/{proxy+}',
+      methods: CATCH_ALL_METHODS,
+      integration: notFoundIntegration,
+    });
+    this.httpApi.addRoutes({
+      path: '/',
+      methods: CATCH_ALL_METHODS,
+      integration: notFoundIntegration,
+    });
 
     // --- Outputs ---
     new CfnOutput(this, 'HttpApiUrl', { value: this.httpApi.url ?? '' });
@@ -622,11 +782,10 @@ export class ApiStack extends Stack {
         },
         {
           id: 'AwsSolutions-IAM5',
-          reason: 'rds-db:connect scoped to app_user; bedrock foundation-model wildcard required for cross-region inference profile; states wildcard for ManualSyncStateMachine deployed in a separate stack',
+          reason: 'rds-db:connect scoped to app_user; bedrock foundation-model wildcard required for cross-region inference profile',
           appliesTo: [
             'Resource::*',
             'Resource::arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6',
-            `Resource::arn:aws:states:${region}:${account}:stateMachine:*`,
           ],
         },
         {
@@ -638,7 +797,7 @@ export class ApiStack extends Stack {
       true,
     );
 
-    for (const fn of [fxFn, taxFn, taxKnowledgeFn, taxStrategyFn]) {
+    for (const fn of [fxFn, taxFn, taxKnowledgeFn, taxStrategyFn, fxStrategyFn]) {
       NagSuppressions.addResourceSuppressions(
         fn,
         [

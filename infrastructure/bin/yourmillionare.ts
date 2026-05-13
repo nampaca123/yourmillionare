@@ -87,6 +87,8 @@ const ingestion = new IngestionStack(app, `${config.stackPrefix}-Ingestion`, {
   lambdaSg: network.lambdaSg,
   aurora: data.aurora,
   codefSecretArn: foundation.codefCredentialSecret.secretArn,
+  ecosSecretArn: foundation.ecosCredentialSecret.secretArn,
+  sharedKey: foundation.sharedKey,
   transactionCache: data.cache.transactionCache,
   bedrockEmbedModel: config.bedrockEmbedModel,
 });
@@ -104,7 +106,7 @@ const api = new ApiStack(app, `${config.stackPrefix}-Api`, {
   identity,
   sharedKey: foundation.sharedKey,
   codefSecret: foundation.codefCredentialSecret,
-  manualSyncStateMachineArn: ingestion.manualSyncStateMachineArn,
+  ecosSecret: foundation.ecosCredentialSecret,
   legalSyncStateMachineArn: ingestion.legalSyncStateMachineArn,
   legalKbId: ingestion.legalKbId,
   filingGeneratorFnArn: ingestion.filingGeneratorFn.functionArn,

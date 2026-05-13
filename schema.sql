@@ -17,8 +17,18 @@
 --
 --  스키마 변경 이력
 --    본 파일은 신규 클러스터에 적용되는 전체 DDL + RLS 단일 진실 원천으로 유지된다.
---    마이그레이션 0006(ai_decisions)·0007(system user SELECT 정책)·0008(raw_transactions.dispatched_at)
---    ·0009(tenant_bank_accounts) 상태가 본 파일에 반영된다. 과거 순번 파일은 schema_migrations 기록 호환용일 수 있다.
+--    아래 migrations 0006–0024의 누적 결과가 본 파일에 반영된다 (idempotent: ALTER TABLE IF NOT EXISTS).
+--      0006 ai_decisions
+--      0007 system user SELECT 정책
+--      0008 raw_transactions.dispatched_at
+--      0009 tenant_bank_accounts
+--      0011 corporation profile / receivable kanban
+--      0018 tenant_bank_accounts balance snapshot
+--      0019 sync_run + sync_run_account (CODEF sync 감사)
+--      0022 sync_run date range / bank_account_id / balance snapshot + raw_transactions first_sync_run_id/bank_account_id
+--      0023 journal_entry_draft DROP — 모든 분개는 journal_entries 안에서 confidence_status로 분류 (certain | uncertain | discarded)
+--      0024 tenant_bank_accounts multi-currency (manual FX 등록 + CODEF foreign 분기)
+--    이전에 존재했던 journal_entry_draft 테이블은 0023 마이그레이션이 데이터를 journal_entries로 이주 후 DROP했다.
 --    운영 DB와의 검증 예: RDS Data API / verifier-schema Lambda (`EXPECTED_POLICIES`).
 --    활성 정책 이름은 `verifier-schema.lambda.ts` 의 EXPECTED_POLICIES 과 일치해야 한다.
 -- ============================================================
@@ -117,15 +127,40 @@ COMMENT ON TABLE tenant_members IS '공동대표 다수가 한 법인 데이터�
 --  5. tenant_bank_accounts — CODEF 연동 은행 계좌
 -- ============================================================
 CREATE TABLE tenant_bank_accounts (
-  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id      UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-  organization   CHAR(4)      NOT NULL,
-  account_number VARCHAR(50)  NOT NULL,
-  connected_id   VARCHAR(100),
-  is_active      BOOLEAN      NOT NULL DEFAULT TRUE,
-  created_at     TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id                UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  organization             CHAR(4)       NOT NULL,
+  account_number           VARCHAR(50)   NOT NULL,
+  connected_id             VARCHAR(100),
+  is_active                BOOLEAN       NOT NULL DEFAULT TRUE,
+  created_at               TIMESTAMPTZ   NOT NULL DEFAULT now(),
+  -- 0018: balance snapshot from latest CODEF sync.
+  last_balance_krw         NUMERIC(18,2),
+  last_withdrawable_krw    NUMERIC(18,2),
+  balance_synced_at        TIMESTAMPTZ,
+  -- 0024: multi-currency (manual FX + CODEF foreign).
+  account_kind             TEXT          NOT NULL DEFAULT 'krw_demand'
+                           CHECK (account_kind IN ('krw_demand', 'foreign')),
+  currency                 CHAR(3)       NOT NULL DEFAULT 'KRW',
+  is_manual                BOOLEAN       NOT NULL DEFAULT FALSE,
+  manual_balance_fcy       NUMERIC(20,4),
+  manual_balance_synced_at TIMESTAMPTZ,
+  bank_label               TEXT,
   UNIQUE (tenant_id, organization, account_number)
 );
+
+CREATE INDEX idx_tenant_bank_accounts_foreign
+  ON tenant_bank_accounts (tenant_id, currency)
+  WHERE account_kind = 'foreign' AND is_active;
+
+COMMENT ON COLUMN tenant_bank_accounts.last_balance_krw          IS 'Most recent account balance fetched from CODEF.';
+COMMENT ON COLUMN tenant_bank_accounts.balance_synced_at         IS 'Timestamp of the CODEF call that produced last_balance_krw.';
+COMMENT ON COLUMN tenant_bank_accounts.account_kind              IS 'krw_demand: existing KRW CODEF account. foreign: user FX exposure (manual or CODEF FX).';
+COMMENT ON COLUMN tenant_bank_accounts.currency                  IS 'ISO 4217. KRW for demand accounts; USD whitelist for foreign MVP.';
+COMMENT ON COLUMN tenant_bank_accounts.is_manual                 IS 'true when the user entered the balance manually rather than CODEF syncing it.';
+COMMENT ON COLUMN tenant_bank_accounts.manual_balance_fcy        IS 'User-entered foreign-currency balance. Only set when is_manual=true.';
+COMMENT ON COLUMN tenant_bank_accounts.manual_balance_synced_at  IS 'Timestamp of the last manual_balance_fcy edit by the user.';
+COMMENT ON COLUMN tenant_bank_accounts.bank_label                IS 'Optional user nickname (e.g. "Citi USD"). Free-form, displayed in /fx/accounts.';
 
 CREATE TABLE tenant_bank_connections (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -136,6 +171,62 @@ CREATE TABLE tenant_bank_connections (
   updated_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
   UNIQUE (tenant_id, organization)
 );
+
+-- ============================================================
+--  5b. sync_run + sync_run_account — CODEF /fs/sync 1회 실행 단위 감사 (migrations 0019 + 0022)
+-- ============================================================
+CREATE TABLE sync_run (
+  id                  UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id           UUID         NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  triggered_by        VARCHAR(20)  NOT NULL CHECK (triggered_by IN ('manual', 'schedule')),
+  triggered_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  started_at          TIMESTAMPTZ,
+  finished_at         TIMESTAMPTZ,
+  status              VARCHAR(20)  NOT NULL DEFAULT 'queued'
+                       CHECK (status IN ('queued', 'running', 'completed', 'failed', 'timed_out')),
+  sfn_execution_arn   TEXT,
+  total_accounts      INTEGER      NOT NULL DEFAULT 0,
+  success_count       INTEGER      NOT NULL DEFAULT 0,
+  error_count         INTEGER      NOT NULL DEFAULT 0,
+  empty_count         INTEGER      NOT NULL DEFAULT 0,
+  user_summary        TEXT,
+  -- 0022: date range bookkeeping for user-selected /fs/sync windows.
+  date_range_from     DATE,
+  date_range_to       DATE
+);
+
+CREATE INDEX idx_sync_run_tenant_triggered ON sync_run (tenant_id, triggered_at DESC);
+
+COMMENT ON TABLE  sync_run                 IS 'One row per /fs/sync execution (manual SSE or scheduled). Audit + UX rollup source.';
+COMMENT ON COLUMN sync_run.date_range_from IS 'User-selected lower bound (inclusive). NULL = incremental (latest_fetched_at - lookback).';
+COMMENT ON COLUMN sync_run.date_range_to   IS 'User-selected upper bound (inclusive). NULL = today.';
+
+CREATE TABLE sync_run_account (
+  id                  BIGSERIAL    PRIMARY KEY,
+  sync_run_id         UUID         NOT NULL REFERENCES sync_run(id) ON DELETE CASCADE,
+  tenant_id           UUID         NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  bank_account_id     UUID         REFERENCES tenant_bank_accounts(id) ON DELETE SET NULL,
+  organization        CHAR(4)      NOT NULL,
+  account_number      TEXT,
+  outcome             VARCHAR(20)  NOT NULL
+                       CHECK (outcome IN ('success', 'no_connection', 'codef_error', 'empty_result', 'balance_only')),
+  codef_error_code    VARCHAR(20),
+  codef_error_message TEXT,
+  user_message        TEXT,
+  fetched_count       INTEGER      NOT NULL DEFAULT 0,
+  balance_updated     BOOLEAN      NOT NULL DEFAULT FALSE,
+  previous_balance    NUMERIC(18,2),
+  current_balance     NUMERIC(18,2),
+  recorded_at         TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_sync_run_account_run ON sync_run_account (sync_run_id);
+
+COMMENT ON TABLE  sync_run_account                  IS 'Per-account outcome inside a sync_run, plus balance snapshot before/after.';
+COMMENT ON COLUMN sync_run_account.previous_balance IS 'tenant_bank_accounts.last_balance_krw snapshot BEFORE this run.';
+COMMENT ON COLUMN sync_run_account.current_balance  IS 'tenant_bank_accounts.last_balance_krw snapshot AFTER this run.';
+
+CREATE TYPE receivable_status AS ENUM ('PENDING', 'DUE_SOON', 'OVERDUE', 'COLLECTED');
 
 
 -- ============================================================
@@ -185,28 +276,47 @@ CREATE TYPE journal_source AS ENUM (
 CREATE TYPE journal_status AS ENUM ('draft', 'posted', 'reversed');
 
 CREATE TABLE journal_entries (
-  id              UUID           PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id       UUID           NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-  entry_date      DATE           NOT NULL,
-  posting_date    DATE           NOT NULL,
-  source          journal_source NOT NULL,
-  source_ref_id   UUID,
-  description     TEXT,
-  status          journal_status NOT NULL DEFAULT 'posted',
-  ai_confidence   NUMERIC(4,3)   CHECK (ai_confidence IS NULL OR ai_confidence BETWEEN 0 AND 1),
-  ai_model        VARCHAR(50),
-  reversed_by     UUID           REFERENCES journal_entries(id),
-  created_at      TIMESTAMPTZ    NOT NULL DEFAULT now(),
-  created_by      UUID           REFERENCES users(id)
+  id                UUID           PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id         UUID           NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  entry_date        DATE           NOT NULL,
+  posting_date      DATE           NOT NULL,
+  source            journal_source NOT NULL,
+  source_ref_id     UUID,
+  description       TEXT,
+  status            journal_status NOT NULL DEFAULT 'posted',
+  ai_confidence     NUMERIC(4,3)   CHECK (ai_confidence IS NULL OR ai_confidence BETWEEN 0 AND 1),
+  ai_model          VARCHAR(50),
+  reversed_by       UUID           REFERENCES journal_entries(id),
+  created_at        TIMESTAMPTZ    NOT NULL DEFAULT now(),
+  created_by        UUID           REFERENCES users(id),
+  -- 0023: confidence model (no separate draft table; uncertain rows are first-class journal_entries).
+  confidence_status TEXT           NOT NULL DEFAULT 'certain'
+                      CHECK (confidence_status IN ('certain', 'uncertain', 'discarded')),
+  confidence        NUMERIC(4,3)   CHECK (confidence IS NULL OR confidence BETWEEN 0 AND 1),
+  origin            TEXT           CHECK (origin IS NULL OR origin IN ('manual', 'heuristic', 'ai', 'ai_low_conf')),
+  sync_run_id       UUID           REFERENCES sync_run(id) ON DELETE SET NULL,
+  -- 0011: receivable kanban tags.
+  receivable_status      receivable_status,
+  receivable_due_date    DATE,
+  receivable_counterparty TEXT
 );
 
 CREATE INDEX idx_journal_entries_tenant_date ON journal_entries(tenant_id, entry_date);
 CREATE INDEX idx_journal_entries_source_ref  ON journal_entries(source_ref_id) WHERE source_ref_id IS NOT NULL;
+CREATE INDEX idx_journal_entries_confidence  ON journal_entries(tenant_id, confidence_status, entry_date DESC);
+CREATE INDEX idx_journal_entries_sync_run    ON journal_entries(sync_run_id) WHERE sync_run_id IS NOT NULL;
+CREATE INDEX idx_journal_entries_receivable
+  ON journal_entries(tenant_id, receivable_status, receivable_due_date)
+  WHERE receivable_status IS NOT NULL;
 
-COMMENT ON TABLE  journal_entries               IS '분개 헤더. 사용자 정정은 reversed_by 체인으로 감사 추적 (in-place edit 금지)';
-COMMENT ON COLUMN journal_entries.entry_date    IS '거래 발생일자';
-COMMENT ON COLUMN journal_entries.posting_date  IS '장부 기록일 (소급 분개 시 entry_date < posting_date)';
-COMMENT ON COLUMN journal_entries.source_ref_id IS 'raw_transactions.id (있을 때). 1 raw → N entries 가능 (할부 등)';
+COMMENT ON TABLE  journal_entries                    IS '분개 헤더. certain 항목은 reversed_by 체인으로만 정정. uncertain 항목은 in-place 수정 후 confirm/discard 가능 (0023).';
+COMMENT ON COLUMN journal_entries.entry_date         IS '거래 발생일자';
+COMMENT ON COLUMN journal_entries.posting_date       IS '장부 기록일 (소급 분개 시 entry_date < posting_date)';
+COMMENT ON COLUMN journal_entries.source_ref_id      IS 'raw_transactions.id (있을 때). 1 raw → N entries 가능 (할부 등)';
+COMMENT ON COLUMN journal_entries.confidence_status  IS 'certain (확정) | uncertain (AI 추정, 사용자 검토 대기) | discarded (사용자 폐기, audit 보존). reports/views 는 전부 반환하고 라벨링한다.';
+COMMENT ON COLUMN journal_entries.confidence         IS '분류 시점의 confidence 0..1. manual 항목은 NULL.';
+COMMENT ON COLUMN journal_entries.origin             IS 'manual | heuristic | ai | ai_low_conf.';
+COMMENT ON COLUMN journal_entries.sync_run_id        IS '이 분개를 만든 sync_run.id. manual 항목은 NULL.';
 
 CREATE TABLE journal_lines (
   id            UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -286,18 +396,25 @@ CREATE TABLE ai_decisions (
 --  7. raw_transactions — CODEF 원응답 + 멱등성
 -- ============================================================
 CREATE TABLE raw_transactions (
-  id            UUID           PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id     UUID           NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-  source        journal_source NOT NULL,
-  external_id   VARCHAR(255)   NOT NULL,
-  occurred_at   TIMESTAMPTZ    NOT NULL,
-  amount        NUMERIC(18,2)  NOT NULL,
-  fcy_currency  CHAR(3),
-  fcy_amount    NUMERIC(18,2),
-  counterparty  VARCHAR(200),
-  raw_payload   JSONB          NOT NULL,
-  fetched_at    TIMESTAMPTZ    NOT NULL DEFAULT now(),
-  dispatched_at TIMESTAMPTZ,
+  id                  UUID           PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id           UUID           NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  source              journal_source NOT NULL,
+  external_id         VARCHAR(255)   NOT NULL,
+  occurred_at         TIMESTAMPTZ    NOT NULL,
+  amount              NUMERIC(18,2)  NOT NULL,
+  fcy_currency        CHAR(3),
+  fcy_amount          NUMERIC(18,2),
+  counterparty        VARCHAR(200),
+  raw_payload         JSONB          NOT NULL,
+  fetched_at          TIMESTAMPTZ    NOT NULL DEFAULT now(),
+  dispatched_at       TIMESTAMPTZ,
+  -- 0011: doc / counterparty BRN / fx_rate.
+  doc_type            VARCHAR(30),
+  counterparty_biz_no VARCHAR(20),
+  fx_rate             NUMERIC(14,6),
+  -- 0022: tag the sync_run that ingested this row + the bank account it came from.
+  first_sync_run_id   UUID           REFERENCES sync_run(id) ON DELETE SET NULL,
+  bank_account_id     UUID           REFERENCES tenant_bank_accounts(id) ON DELETE SET NULL,
   UNIQUE (tenant_id, source, external_id)
 );
 
@@ -307,9 +424,15 @@ CREATE INDEX idx_raw_undispatched
   ON raw_transactions(tenant_id, dispatched_at)
   WHERE dispatched_at IS NULL;
 
-COMMENT ON TABLE  raw_transactions             IS 'CODEF 원응답 보관. (tenant_id, source, external_id) UNIQUE로 폴링 멱등성 보장';
-COMMENT ON COLUMN raw_transactions.amount      IS 'KRW 환산 금액. 외화 거래는 raw_payload의 환율로 환산해서 저장';
-COMMENT ON COLUMN raw_transactions.raw_payload IS 'CODEF 응답 원문. 분개 재생성·디버깅·감사 대비';
+CREATE INDEX idx_raw_tx_first_sync_run
+  ON raw_transactions(first_sync_run_id)
+  WHERE first_sync_run_id IS NOT NULL;
+
+COMMENT ON TABLE  raw_transactions                   IS 'CODEF 원응답 보관. (tenant_id, source, external_id) UNIQUE로 폴링 멱등성 보장';
+COMMENT ON COLUMN raw_transactions.amount            IS 'KRW 환산 금액. 외화 거래는 raw_payload의 환율로 환산해서 저장';
+COMMENT ON COLUMN raw_transactions.raw_payload       IS 'CODEF 응답 원문. 분개 재생성·디버깅·감사 대비';
+COMMENT ON COLUMN raw_transactions.first_sync_run_id IS 'sync_run.id that first ingested this raw tx.';
+COMMENT ON COLUMN raw_transactions.bank_account_id   IS 'tenant_bank_accounts.id this tx was fetched from. Drives SSE response sourceAccount.';
 
 
 -- ============================================================
@@ -374,6 +497,8 @@ ALTER TABLE journal_entries  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE journal_lines    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ai_decisions     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE raw_transactions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sync_run         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sync_run_account ENABLE ROW LEVEL SECURITY;
 ALTER TABLE users            ENABLE ROW LEVEL SECURITY;
 ALTER TABLE user_profiles    ENABLE ROW LEVEL SECURITY;
 
@@ -480,6 +605,16 @@ CREATE POLICY tenant_isolation ON ai_decisions
   WITH CHECK (tenant_id = app_uuid_from_setting('app.current_tenant_id'));
 
 CREATE POLICY tenant_isolation ON raw_transactions
+  FOR ALL TO app_user
+  USING      (tenant_id = app_uuid_from_setting('app.current_tenant_id'))
+  WITH CHECK (tenant_id = app_uuid_from_setting('app.current_tenant_id'));
+
+CREATE POLICY tenant_isolation ON sync_run
+  FOR ALL TO app_user
+  USING      (tenant_id = app_uuid_from_setting('app.current_tenant_id'))
+  WITH CHECK (tenant_id = app_uuid_from_setting('app.current_tenant_id'));
+
+CREATE POLICY tenant_isolation ON sync_run_account
   FOR ALL TO app_user
   USING      (tenant_id = app_uuid_from_setting('app.current_tenant_id'))
   WITH CHECK (tenant_id = app_uuid_from_setting('app.current_tenant_id'));

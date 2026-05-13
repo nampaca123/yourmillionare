@@ -1,703 +1,594 @@
 # YourMillionaire — Frontend Integration Guide
 
 > **Audience**: 이 백엔드를 호출할 프론트엔드 개발자.
-> **단일 출처**: 이 문서만 보고 클라이언트 통합을 끝낼 수 있도록 작성됨. 누락된 부분이 있으면 이슈로 알려주세요.
-> **Last verified**: 2026-05-11 (deployed dev 환경에서 라이브 응답 캡처).
+> **단일 출처**: 이 문서만 보고 클라이언트 통합을 끝낼 수 있도록 작성됨.
+> **Last verified**: 2026-05-13 (deployed dev 환경에서 라이브 응답 캡처, migrations 0001–0023 적용).
 
 ---
 
 ## TL;DR
 
 ```
-Base URL (dev) : https://p7d9jms82f.execute-api.ap-northeast-2.amazonaws.com
-Cognito Domain : https://yourmillionare-dev.auth.ap-northeast-2.amazoncognito.com
-Region         : ap-northeast-2
-Auth scheme    : Cognito ID Token (Bearer), 발급은 Hosted UI 또는 SDK
-CORS allowed   : http://localhost:3000, http://localhost:5173 (env로 추가 가능)
+HTTP API (REST)     : https://p7d9jms82f.execute-api.ap-northeast-2.amazonaws.com
+CodefSyncStreamFnUrl: https://vh3nq63kxcjcrjkabaikqrddzm0ymhbf.lambda-url.ap-northeast-2.on.aws/  (SSE)
+TaxStrategyFnUrl    : https://la3losebvhzb5yrzliyopfcl6m0qikyd.lambda-url.ap-northeast-2.on.aws/  (SSE)
+Cognito Domain      : https://yourmillionare-dev.auth.ap-northeast-2.amazoncognito.com
+Region              : ap-northeast-2
+Auth scheme         : Cognito ID Token (Bearer), 발급은 Hosted UI 또는 SDK
+CORS allowed        : http://localhost:3000, http://localhost:5173 (env로 추가 가능)
 ```
 
-최소 호출 시퀀스 (3줄):
-```bash
-TOKEN="<Cognito ID Token>"
-TENANT=$(curl -s -H "Authorization: Bearer $TOKEN" "$BASE/me" | jq -r .defaultTenantId)
-curl -s -H "Authorization: Bearer $TOKEN" "$BASE/tenants/$TENANT/journal/entries?from=2026-05-01&to=2026-05-31"
-```
+세 가지 base URL을 구분해서 호출한다:
+- **HTTP API** — 모든 REST endpoint (CRUD, 조회).
+- **CodefSyncStreamFnUrl** — `POST /tenants/{id}/fs/sync` 전용. text/event-stream 으로 답함.
+- **TaxStrategyFnUrl** — `POST /tenants/{id}/tax/strategy` 전용. text/event-stream.
+- **FxStrategyFnUrl** — `POST /tenants/{id}/fx/strategy` 전용. text/event-stream.
+
+CDK output (`Ym-Dev-Api.HttpApiUrl`, `Ym-Dev-Api.CodefSyncStreamFnUrl`, `Ym-Dev-Api.TaxStrategyFnUrl`)이 권위 있는 출처.
 
 ---
 
-## 1. 환경
+## 1. 인증 (Cognito ID Token)
 
-| 항목 | dev |
-|------|-----|
-| HTTP API Gateway | `https://p7d9jms82f.execute-api.ap-northeast-2.amazonaws.com` |
-| Cognito User Pool ID | `ap-northeast-2_wSw9ItHbS` |
-| Cognito User Pool Client ID | `6sop98o9dvge94bsipftmkrkeh` |
-| Cognito Hosted UI domain | `https://yourmillionare-dev.auth.ap-northeast-2.amazoncognito.com` |
-| Cognito Issuer URL | `https://cognito-idp.ap-northeast-2.amazonaws.com/ap-northeast-2_wSw9ItHbS` |
-| Region | `ap-northeast-2` (Seoul) |
-| 데이터 시간대 | 모든 timestamp 응답은 ISO 8601 UTC (`Z` suffix), 날짜 응답은 `YYYY-MM-DD` (Asia/Seoul 기준 일자) |
+### 1.1 Google OAuth via Cognito Hosted UI
 
-prod URL은 별도 발급 시 추가. CDK 배포 출력 (`Ym-Dev-Api.HttpApiUrl`, `Ym-Dev-Identity.HostedUiDomainBaseUrl`)이 권위 있는 출처.
-
-### 1.1 헬스체크 (CORS-friendly, 인증 불필요)
-
-```http
-GET /health
 ```
-응답:
-```json
-{ "status": "ok" }
+Step 1 — 로그인 버튼 → Cognito Hosted UI 로 redirect:
+  https://yourmillionare-dev.auth.ap-northeast-2.amazoncognito.com/oauth2/authorize
+    ?client_id=6sop98o9dvge94bsipftmkrkeh
+    &response_type=code
+    &scope=email+openid+profile
+    &identity_provider=Google
+    &redirect_uri=<프론트엔드 callback URL — 사전 등록 필요>
+
+Step 2 — Cognito가 code 와 함께 callback URL로 redirect
+
+Step 3 — Token 교환 (PKCE 권장):
+  POST https://yourmillionare-dev.auth.ap-northeast-2.amazoncognito.com/oauth2/token
+  → { id_token, access_token, refresh_token, expires_in: 3600 }
+
+Step 4 — API 호출: Authorization: Bearer <id_token>
 ```
-**용도**: 클라이언트 시작 시 백엔드 연결 확인.
+
+ID Token TTL = 1시간, Refresh Token TTL = 30일. **API 호출에는 `id_token` 만 사용** (`access_token` 무시).
+
+### 1.2 추천 헤더
+
+| 헤더 | 언제 |
+|------|------|
+| `Authorization: Bearer <id_token>` | `/health` 외 모든 endpoint |
+| `Content-Type: application/json` | POST / PATCH 본문 있을 때 |
+| `Idempotency-Key: <uuid>` | `POST /tenants`, `POST /journal/classify` 권장 |
 
 ---
 
-## 2. 인증 (Cognito ID Token)
+## 2. 공통 규약
 
-### 2.1 브라우저용 Google OAuth (production-grade)
+### 2.1 에러 응답
 
-이 흐름이 일반 사용자가 사용하는 정식 경로. 프론트엔드는 다음 단계를 구현:
-
-**Step 1 — 로그인 버튼 클릭 시 Hosted UI로 redirect**:
-```
-https://yourmillionare-dev.auth.ap-northeast-2.amazoncognito.com/oauth2/authorize
-  ?client_id=6sop98o9dvge94bsipftmkrkeh
-  &response_type=code
-  &scope=email+openid+profile
-  &identity_provider=Google
-  &redirect_uri=<프론트엔드 callback URL — 사전 등록 필요>
-```
-> `identity_provider=Google`을 빼면 Cognito가 IdP 선택 화면을 보여줍니다. Google로 바로 보내려면 명시.
-
-**Step 2 — Google 인증 후 callback**:
-사용자가 Google에서 동의하면 Cognito가 다음 형식으로 redirect:
-```
-<프론트엔드 callback URL>?code=<authorization_code>&state=<...>
-```
-
-**Step 3 — Code → Token 교환** (프론트엔드 SPA에서 직접 가능, PKCE 권장):
-```http
-POST https://yourmillionare-dev.auth.ap-northeast-2.amazoncognito.com/oauth2/token
-Content-Type: application/x-www-form-urlencoded
-
-grant_type=authorization_code
-&client_id=6sop98o9dvge94bsipftmkrkeh
-&code=<authorization_code>
-&redirect_uri=<동일 callback URL>
-```
-응답:
-```json
-{
-  "id_token": "eyJraWQi...",
-  "access_token": "eyJraWQi...",
-  "refresh_token": "eyJjdHki...",
-  "expires_in": 3600,
-  "token_type": "Bearer"
-}
-```
-**API 호출에는 `id_token`만 사용**. `access_token`은 무시.
-
-**Step 4 — API 호출**:
-```
-Authorization: Bearer <id_token>
-```
-
-### 2.2 등록된 callback / logout URL
-
-CDK가 등록한 default callback: `http://localhost:3000/callback`. 프론트엔드 production 도메인이 정해지면 `infrastructure/lib/stacks/identity.stack.ts`의 `COGNITO_CALLBACK_URLS` env로 추가 후 재배포.
-
-GCP OAuth Client에 등록된 redirect URI (Cognito 측):
-`https://yourmillionare-dev.auth.ap-northeast-2.amazoncognito.com/oauth2/idpresponse`
-
-### 2.3 토큰 만료와 갱신
-
-- ID Token TTL: **1시간** (Cognito 기본값)
-- Refresh Token TTL: **30일** (Cognito 기본값)
-- 만료된 ID Token으로 호출 시: `401 Unauthorized` (API Gateway 단에서 차단)
-- 갱신: refresh_token으로 동일 token endpoint 재호출 (`grant_type=refresh_token`)
-
-### 2.4 추천 헤더
-
-| 헤더 | 언제 | 비고 |
-|------|------|------|
-| `Authorization: Bearer <id_token>` | `/health` 외 모든 endpoint | 빠지면 401 |
-| `Content-Type: application/json` | POST 요청 시 | 본문 있는 경우 필수 |
-| `Idempotency-Key: <uuid>` | `POST /tenants`, `POST /journal/classify`에 권장 | 동일 키 + 동일 본문 → 24h 동안 캐시 응답 재생. 다른 본문 → 409 |
-
-### 2.5 (참고) 개발자 직접 인증 — 브라우저 우회
-
-E2E/디버그용. 일반 사용자에게는 노출 X. AWS 자격증명 + `ADMIN_USER_PASSWORD_AUTH` flow:
-```bash
-aws cognito-idp admin-initiate-auth \
-  --user-pool-id ap-northeast-2_wSw9ItHbS \
-  --client-id 6sop98o9dvge94bsipftmkrkeh \
-  --auth-flow ADMIN_USER_PASSWORD_AUTH \
-  --auth-parameters "USERNAME=...,PASSWORD=..." \
-  --query 'AuthenticationResult.IdToken' --output text
-```
-
----
-
-## 3. 공통 규약
-
-### 3.1 성공 응답
-
-각 endpoint별로 명세 (Section 5 참고). 공통 봉투(envelope) 없이 도메인 객체를 그대로 반환. 예: `{ "id": "...", "email": "..." }` 또는 배열 `[ {...}, {...} ]`.
-
-### 3.2 에러 응답 — 통일된 형식
-
-API Gateway가 던지는 401 외에는 모두 다음 형식:
 ```json
 { "error": { "code": "UNAUTHORIZED", "message": "Authentication required." } }
 ```
 
-API Gateway가 직접 차단한 401 (토큰 누락/위조)은 다음 형식 (envelope 없음):
+API Gateway 가 직접 차단한 401 은 envelope 없이:
 ```json
 { "message": "Unauthorized" }
 ```
 
-프론트엔드는 두 형식 모두 처리해야 함 — 401이면 토큰 재발급 화면으로.
+FE는 두 형식 모두 처리해야 함 — 401이면 토큰 재발급 화면으로.
 
-### 3.3 HTTP status code 의미 (전 endpoint 공통)
+### 2.2 HTTP status code
 
-| HTTP | 언제 | 어떻게 대응 |
-|------|------|-------------|
+| HTTP | 의미 | FE 대응 |
+|---|---|---|
 | 200 / 201 | 성공 | — |
-| **400** | 본문이 JSON이 아님 | 클라이언트 버그. 본문 형식 점검 |
-| **401** | 토큰 없음 / 만료 / 위조 | 로그인 화면으로 redirect (refresh 시도 권장) |
-| **403** | 토큰은 유효하지만 해당 tenant 멤버 아님 | "권한 없음" 메시지. 다른 tenant 선택지 제공 (`GET /me/tenants`) |
-| **404** | 라우트 없음 | URL 오타. 본 문서 Section 5 endpoint 일람 확인 |
-| **409** | 중복(unique 위반) / Idempotency key 재사용 | "이미 존재함". 사용자에게 안내 |
-| **422** | 입력 형식 / Zod 검증 실패 | form 입력 재검증. 응답의 `code`로 어떤 필드인지 분기 |
-| **429** | 분류 일일 한도 초과 / Bedrock throttling | "잠시 후 다시" 안내. 자동 재시도하지 말 것 |
-| **500** | 서버 내부 오류 | 사용자에게 일반 메시지 + Sentry/Datadog 등에 보고 |
-| **502 / 503 / 504** | 외부 서비스 (CODEF, Bedrock) 장애 | 사용자에게 "은행/AI 서비스 일시 장애" 안내 |
+| 400 | 본문이 JSON 아님 | form 점검 |
+| 401 | 토큰 문제 | 재로그인 |
+| 403 | tenant 멤버 아님 | 다른 tenant 선택 (`GET /me/tenants`) |
+| 404 | 리소스 없음 | URL 확인 |
+| 409 | 중복 / Idempotency 충돌 / 상태 전이 불가 | 메시지 안내 |
+| 422 | 입력 검증 실패 / 라인 unbalanced 등 | form 재검증 |
+| 429 | Bedrock 한도 초과 / throttling | 자동 재시도 X, 시간 두고 재시도 |
+| 500 | 미처리 예외 | 로깅 + 재시도 |
+| 502 / 503 / 504 | 외부 서비스 장애 | 일시 장애 안내 |
 
-### 3.4 필드 규약
+### 2.3 응답 필드 형식
 
-| 항목 | 형식 | 예시 |
-|------|------|------|
-| ID 필드 (모든 `id`, `tenantId` 등) | UUID v4 | `881efe03-8181-4ae1-b6d3-0c16d87feba1` |
-| 날짜 (entry_date 등) | ISO date `YYYY-MM-DD` | `2026-05-10` |
-| 시각 (createdAt 등 — 응답에는 거의 미노출) | ISO 8601 UTC | `2026-05-11T00:07:44.687Z` |
-| 금액 (debit, credit) | **정수 KRW** (소수점 없음) | `5000` (= 5,000원) |
-| 키 (clientName 등) | camelCase | `defaultTenantId`, `accountNumber` |
-| Enum (organization 코드) | 4자리 문자열 (CODEF 기관코드) | `"0088"` (신한), `"0020"` (우리), `"0081"` (하나) |
-| Bank account number | 하이픈 포함/제외 자유. 서버는 그대로 저장 | `"110443478154"` 또는 `"110-443-478154"` |
+| 항목 | 형식 |
+|---|---|
+| ID (`id`, `tenantId`, `entryId`) | UUID v4 |
+| 날짜 (`entryDate`) | `YYYY-MM-DD` |
+| 시각 (`createdAt`) | ISO 8601 UTC (`Z` suffix) |
+| 금액 (개별 line `debit`/`credit`) | 정수 KRW |
+| 집계 금액 (P&L, BS, summary, balances 등) | **AmountBreakdown** — `{ certain, uncertain, total }` (자세히는 §4) |
+| Organization 코드 | 4자리 문자열 (`"0088"` 신한, `"0020"` 우리, `"0081"` 하나) |
 
-### 3.5 CORS
+### 2.4 Pagination
 
-API Gateway에 다음 정책이 설정됨:
-- **Allowed origins**: `http://localhost:3000`, `http://localhost:5173` (Vite 기본). 추가는 CDK env `API_CORS_ALLOWED_ORIGINS` (콤마 구분)
-- **Allowed methods**: `GET, POST, OPTIONS`
-- **Allowed headers**: `Authorization, Content-Type, Idempotency-Key`
-- **Allow credentials**: false (Cognito는 `Authorization` 헤더만 사용, 쿠키 X)
-- **Max-Age**: 600s
-
-브라우저는 OPTIONS preflight를 자동 처리 — 별도 코드 불필요.
-
-### 3.6 Pagination
-
-`GET` endpoint 중 list 반환:
+리스트 endpoint:
 - `limit`: 1~100, default 20
 - `offset`: 0+, default 0
-- 응답에 `entries` 키로 배열 반환. **현재 totalCount는 미반환** — 한 번 더 호출해서 길이 확인하거나 limit+1로 호출해 hasMore 판단.
+- 응답 키: `entries` (journal), `runs` (sync_run history) 등
 
-### 3.7 Idempotency
+### 2.5 Idempotency
 
-`POST /tenants`, `POST /tenants/{id}/journal/classify`는 `Idempotency-Key` 헤더(권장 UUID) 지원. 동일 key + 동일 body → 24h 동안 첫 응답 그대로 재생. 동일 key + 다른 body → `409 IDEMPOTENCY_KEY_REUSED`. 처리 중인 동일 key 재요청 → `409 IDEMPOTENCY_IN_PROGRESS`.
-
-### 3.8 Rate limits
-
-- **Bedrock 분류 일일 한도**: 사용자별 100건/일 (env `BEDROCK_DAILY_LIMIT_PER_USER`). 초과 시 `429 BEDROCK_DAILY_LIMIT_EXCEEDED`.
-- **Bedrock SDK throttling**: AWS 측 throttle 시 `429 BEDROCK_THROTTLED`.
-- 그 외 endpoint별 별도 rate limit는 현재 없음 (API Gateway burst 한도만 적용).
+`POST /tenants`, `POST /journal/classify` 는 `Idempotency-Key` 헤더 지원. 동일 키 + 동일 body → 24h 동안 첫 응답 재생. 동일 키 + 다른 body → `409 IDEMPOTENCY_KEY_REUSED`.
 
 ---
 
-## 4. 사용자 워크플로우 (검증 완료)
+## 3. SSE — `POST /tenants/{tenantId}/fs/sync` (단일 호출로 모든 결과 받기)
 
-다음 시퀀스는 deployed dev 환경에서 실제 호출이 검증된 흐름입니다 (16/16 PASS, `docs/API_TEST_RESULTS.md` 참조).
+> **이 endpoint 가 가장 중요합니다.** 사용자가 "내 통장 거래 분개해줘" 라고 누르면 이 한 호출로 끝납니다. CODEF 호출 + Bedrock 분류 + DB 저장 + 결과 전달까지 한 connection 에서 진행됩니다.
 
-### 4.1 신규 사용자가 처음으로 자기 통장 거래 분개를 보기까지
-
-**Step 1 — 로그인** (Section 2.1 참고)
-사용자가 Google 계정으로 로그인 → ID Token 확보.
-
-**Step 2 — `GET /me`** (사용자 정보 + personal tenant 자동 발급)
-```bash
-curl -H "Authorization: Bearer $TOKEN" \
-  https://p7d9jms82f.execute-api.ap-northeast-2.amazonaws.com/me
 ```
-응답 (실제 라이브):
+Base URL: CodefSyncStreamFnUrl (Function URL, NOT API Gateway)
+Method:   POST
+Path:     /tenants/{tenantId}/fs/sync
+Headers:  Authorization: Bearer <id_token>
+          Content-Type: application/json
+```
+
+### 3.1 Request body (전부 optional)
+
 ```json
 {
-  "id": "dab67bfa-d997-47ba-8d23-eccd64ed4868",
-  "cognitoSub": "14d8cd8c-3061-701f-9ae6-ccb45ba75c03",
-  "email": "api-e2e-6a639eee@ym-e2e.test",
-  "defaultTenantId": "881efe03-8181-4ae1-b6d3-0c16d87feba1"
-}
-```
-프론트엔드는 `defaultTenantId`를 저장. 이후 `/tenants/{tenantId}/...` 모든 호출에 사용. **첫 호출 시 personal tenant가 자동 발급되며, 이후 호출은 같은 ID 반환 (idempotent)**. 별도 가입/사업자등록번호 입력 단계 불필요.
-
-**Step 3 — `POST /tenants/{tenantId}/bank-connections`** (은행 인증 + 계좌 디스커버리)
-```bash
-curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{
-    "organization": "0088",
-    "loginId": "shinhan_id",
-    "loginPassword": "shinhan_password"
-  }' \
-  "$BASE/tenants/881efe03-8181-4ae1-b6d3-0c16d87feba1/bank-connections"
-```
-응답:
-```json
-{
-  "connectionId": "uuid",
-  "accounts": [
-    { "accountNumber": "110226771592", "accountName": "신한투자증권+증권거래예금", "balance": "120" },
-    { "accountNumber": "110443478154", "accountName": "TEENS+PLUS통장",        "balance": "417210" }
-  ]
+  "from": "2026-04-01",
+  "to":   "2026-04-30",
+  "accountIds": ["uuid", "uuid"]
 }
 ```
 
-**프론트엔드 UX 권장**:
-- 비밀번호 입력 폼은 즉시 마스킹 (`type="password"`)
-- 응답 후 `accounts` 배열을 사용자에게 카드 리스트로 표시
-- 신한은행 5회 PW 오류 시 인터넷뱅킹 잠금 위험 → 로그인 시도 횟수를 클라이언트에서도 카운트하고 3회 실패 시 사용자에게 강한 경고
-- 응답이 `502 CODEF_ACCOUNT_ERROR` + 메시지에 "lock" 포함 시 잠금 임박 → 즉시 사용자에게 안내
+- `from` / `to` 둘 다 생략하면 incremental (latestFetchedAt - 2일 ~ 오늘).
+- `from` / `to` 둘 중 하나만 보내면 422.
+- `to - from > 366` 일이면 422.
+- `accountIds` 생략 시 tenant 의 활성 계좌 전부.
 
-**Step 4 — `POST /tenants/{tenantId}/bank-accounts`** (사용자가 모니터링할 계좌 선택)
-```bash
-curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{ "organization": "0088", "accountNumber": "110443478154" }' \
-  "$BASE/tenants/881efe03-8181-4ae1-b6d3-0c16d87feba1/bank-accounts"
-```
-응답:
-```json
-{
-  "id": "uuid",
-  "tenantId": "881efe03-8181-4ae1-b6d3-0c16d87feba1",
-  "organization": "0088",
-  "accountNumber": "110443478154",
-  "isActive": true
-}
-```
-**자격증명 재입력 불필요** — Step 3에서 캐시된 `connectedId`가 자동 결합. 여러 계좌를 모니터링하려면 이 호출을 반복.
+### 3.2 Response — `text/event-stream`
 
-**Step 5 — 잠시 대기** (백그라운드 처리)
-Step 4 직후에는 거래내역이 없음. 백엔드 Step Functions가 6시간마다 자동 실행해 CODEF에서 거래내역을 가져와 Bedrock으로 분류. 사용자가 즉시 보고 싶다면 백엔드 운영자가 SFN을 수동 트리거 (별도 endpoint 없음, 운영 작업).
+```
+data: {"type":"run-started","syncRunId":"<uuid>","dateRange":{"from":null,"to":null}}
 
-**Step 6 — `GET /tenants/{tenantId}/journal/entries`** (분개 결과 조회)
-```bash
-curl -H "Authorization: Bearer $TOKEN" \
-  "$BASE/tenants/881efe03-8181-4ae1-b6d3-0c16d87feba1/journal/entries?from=2026-05-01&to=2026-05-31&limit=20"
+data: {"type":"account","bankAccountId":"<uuid>","organization":"0088","accountNumberMasked":"********8154",
+        "outcome":"success","fetchedCount":12,"balanceUpdated":true,
+        "balance":{"previous":1000000,"current":1234567,"delta":234567,"currency":"KRW"},
+        "codefErrorCode":null,"codefErrorMessage":null,"userMessage":null}
+
+data: {"type":"classification","rawTransactionId":"<uuid>",
+        "sourceAccount":{"bankAccountId":"<uuid>","organization":"0088","accountNumberMasked":"********8154"},
+        "occurredAt":"2026-04-15T09:32:00.000Z","entryDate":"2026-04-15",
+        "counterparty":"스타벅스 강남점","memo":"스타벅스 강남점",
+        "amount":6500,"currency":"KRW",
+        "status":"certain",           ← certain | uncertain
+        "origin":"ai",                ← heuristic | ai | ai_low_conf
+        "confidence":0.92,
+        "ruleId":"bedrock:global.anthropic.claude-sonnet-4-6",
+        "lines":[
+          {"lineNo":1,"accountCode":"5101","debit":6500,"credit":0,"memo":null},
+          {"lineNo":2,"accountCode":"1001","debit":0,"credit":6500,"memo":null}
+        ],
+        "journalEntryId":"<uuid>"}    ← certain 일 때만 채워짐. uncertain 은 entryId 가 따로 있고 PATCH/confirm 으로 접근
+
+data: {"type":"heartbeat","ts":1778635312000}    ← 10초마다, Lambda timeout 방지
+
+data: {"type":"done","syncRunId":"<uuid>",
+        "totals":{"accountsScanned":1,"accountsSucceeded":1,"accountsFailed":0,
+                  "transactionsFetched":12,"transactionsCertain":8,"transactionsUncertain":4},
+        "durationMs":2652}
 ```
-응답 (실제 라이브):
-```json
-{
-  "entries": [
-    {
-      "id": "d3d1e1a0-8f30-486d-8b57-e3712a29f52d",
-      "entryDate": "2026-05-10",
-      "source": "codef_bank",
-      "description": "신한체",
-      "aiConfidence": 0.6,
-      "aiModel": "global.anthropic.claude-sonnet-4-6",
-      "sourceRefId": "1dc13113-3871-4995-889e-8569a30430b9",
-      "lines": [
-        { "lineNo": 1, "accountCode": "5401", "debit": 5000, "credit": 0, "memo": null },
-        { "lineNo": 2, "accountCode": "1002", "debit": 0,    "credit": 5000, "memo": null }
-      ]
-    }
-  ]
-}
+
+### 3.3 에러 발생 시
+
 ```
-**프론트엔드 UX 권장**:
-- `aiConfidence < 0.5`인 entry는 사용자에게 "AI 분류 확신도 낮음" 표시 + 수동 정정 옵션 제공
-- `lines` 배열은 항상 차변 합 = 대변 합 (복식부기). 화면 표시 시 한 줄로: "5,401 보통예금 5,000원 → 5401 통신비"
-- `accountCode → 계정명` 매핑은 별도 endpoint 미제공. 향후 `GET /accounts` 추가 검토 (현재는 클라이언트에서 K-IFRS 표준 매핑 하드코딩)
+data: {"type":"error","status":<HTTP code>,"reason":"<userMessage>"}
+data: {"type":"done","syncRunId":"<uuid|null>","durationMs":<n>,"failed":true}
+```
+
+### 3.4 FE 구현 메모
+
+- 표준 `EventSource` 가 POST 를 지원하지 않으므로 fetch + `ReadableStream` 으로 처리하거나 [`fetch-event-source`](https://github.com/Azure/fetch-event-source) 같은 라이브러리 사용.
+- `classification` 이벤트가 들어올 때마다 list 에 prepend. `status: 'certain'` 은 즉시 화면에, `'uncertain'` 은 별도 색 / 검토 배지 + PATCH 버튼.
+- `done` 이벤트 후 connection 종료. 별도 GET 으로 결과 재조회할 필요 없음 — 모든 분개는 `GET /entries` 로 동일하게 조회 가능.
 
 ---
 
-## 5. API Reference
+## 4. AmountBreakdown — 집계 응답의 공통 모양
 
-각 endpoint마다 **External / Advanced / Internal** 라벨로 프론트엔드 노출 여부를 구분.
+P&L / BS / CF / TB / monthly summary / accounts balances / receivables 등 **모든 집계 금액 필드**는 다음 형식:
 
-| 라벨 | 의미 |
-|------|------|
-| 🟢 **External** | 일반 사용자 UI에서 직접 사용 |
-| 🟡 **Advanced** | 회계 전문가/관리자 UI에서만 노출. 일반 사용자 화면에는 숨김 |
-| 🔴 **Internal** | 백엔드/디버깅 전용. 프론트엔드 UI에 노출하지 말 것 |
+```json
+{ "certain": 12000000, "uncertain": 3000000, "total": 15000000 }
+```
+
+- `certain` — `confidence_status='certain'` 인 분개의 합. 신뢰 가능한 audit-grade 숫자.
+- `uncertain` — `confidence_status='uncertain'` 인 분개의 합. AI 추정. 사용자가 확정하기 전.
+- `total` — `certain + uncertain`. 보통 화면에 메인으로 노출되는 숫자.
+
+**FE 권장 렌더링**: total 을 큰 글씨로 보여주고, uncertain 비중을 작은 글씨/배지로 ("그 중 AI 추정 3,000,000원"). 색은 회색/노란색 등 신뢰도 시각화.
+
+별도 토글이나 query param 없이 항상 셋 다 반환된다 — 백엔드가 데이터를 숨기지 않는다.
 
 ---
 
-### 5.1 `GET /health` 🟢 External
+## 5. Endpoint Reference (HTTP API)
+
+라벨: 🟢 일반 사용자 UI / 🟡 회계 전문가·관리자 / 🔴 디버깅 전용
+
+### 5.1 인증 / 사용자
+
+#### `GET /health` 🟢
 
 | 항목 | 내용 |
-|------|------|
-| **기능** | 백엔드 liveness probe. 시작 시 한 번 호출해 연결 확인 |
+|---|---|
 | **인증** | 불필요 |
-| **요청** | 본문 없음 |
 | **응답 200** | `{ "status": "ok" }` |
-| **에러** | 거의 없음 (네트워크 실패 시 응답 없음) |
 
----
-
-### 5.2 `GET /me` 🟢 External
+#### `GET /me` 🟢
 
 | 항목 | 내용 |
-|------|------|
-| **기능** | (1) JWT의 `sub`/`email`로 사용자 upsert (2) 사용자의 personal tenant가 없으면 자동 발급 (3) `defaultTenantId` 포함 응답 |
-| **인증** | 필수 (ID Token) |
-| **호출 빈도** | 로그인 직후 1회 + 토큰 갱신 시 1회. 페이지마다 호출하지 말 것 (캐시) |
-| **요청** | 본문 없음 |
-
-**응답 200**:
-```json
-{
-  "id": "dab67bfa-d997-47ba-8d23-eccd64ed4868",
-  "cognitoSub": "14d8cd8c-3061-701f-9ae6-ccb45ba75c03",
-  "email": "user@example.com",
-  "defaultTenantId": "881efe03-8181-4ae1-b6d3-0c16d87feba1"
-}
-```
-
-`defaultTenantId`는 personal tenant (BizRegNo 없는 1인 워크스페이스). 첫 호출 시 자동 생성, 이후 동일.
-
-| 에러 | HTTP | code |
-|------|------|------|
-| 토큰 없음/만료/위조 | 401 | (Gateway: `{"message":"Unauthorized"}`) |
-| JWT 클레임 형식 불일치 | 401 | `UNAUTHORIZED` |
-| Lambda 콜드스타트 타임아웃 (드물게) | 500 | (Gateway 기본) |
-
----
-
-### 5.3 `POST /tenants` 🟡 Advanced
-
-| 항목 | 내용 |
-|------|------|
-| **기능** | 법인 사업자 사용자가 BRN(사업자등록번호) 기반의 추가 tenant를 명시 생성. **개인 사용자는 호출 불필요** — `GET /me`에서 personal tenant가 자동 발급됨 |
+|---|---|
+| **기능** | JWT 의 sub/email 로 user upsert + personal tenant 자동 발급 |
 | **인증** | 필수 |
-| **멱등성** | `Idempotency-Key` 헤더 권장 (선택) |
+| **응답 200** | `{ id, cognitoSub, email, defaultTenantId, tenantType }` |
+| **호출 빈도** | 로그인 직후 1회 + 토큰 갱신 시 1회 (캐시). 페이지마다 호출 X |
 
-**요청 본문**:
-```json
-{
-  "legalName":   "주식회사 OOO",
-  "displayName": "OOO",
-  "bizRegNo":    "1234567890"
-}
-```
-- `bizRegNo`: 선택. 생략하면 personal tenant 생성. 입력 시 10자리 숫자 (하이픈 무관, 내부 정규화)
-
-**응답 201**:
-```json
-{
-  "id": "uuid",
-  "legalName": "주식회사 OOO",
-  "displayName": "OOO"
-}
-```
-
-| 에러 | HTTP | code |
-|------|------|------|
-| 토큰 문제 | 401 | (Gateway/`UNAUTHORIZED`) |
-| 본문 JSON 파싱 실패 | 400 | `VALIDATION_ERROR` |
-| BRN 형식 오류 (10자리 숫자 아님) | 422 | `VALIDATION_ERROR` |
-| 동일 BRN 중복 | 409 | `CONFLICT` |
-| Idempotency-Key 같은데 본문 다름 | 409 | `IDEMPOTENCY_KEY_REUSED` |
-| Idempotency-Key 처리 중 | 409 | `IDEMPOTENCY_IN_PROGRESS` |
-
----
-
-### 5.4 `GET /me/tenants` 🟢 External
+#### `GET /me/tenants` 🟢
 
 | 항목 | 내용 |
-|------|------|
-| **기능** | 사용자가 멤버인 모든 tenant 리스트. UI의 "워크스페이스 전환" 메뉴에 사용 |
-| **인증** | 필수 |
+|---|---|
+| **기능** | 사용자가 멤버인 tenant 리스트 |
+| **응답 200** | `[ { id, legalName, displayName }, ... ]` |
 
-**응답 200** (실제 라이브):
-```json
-[
-  { "id": "4180f5a3-0a11-49bb-bd2a-d0a4eb760324", "legalName": "E2E Legal", "displayName": "E2E Disp" },
-  { "id": "881efe03-8181-4ae1-b6d3-0c16d87feba1", "legalName": "user@example.com", "displayName": "user@example.com" }
-]
-```
-
-| 에러 | HTTP |
-|------|------|
-| 토큰 문제 | 401 |
-
----
-
-### 5.5 `POST /tenants/{tenantId}/bank-connections` 🟢 External
+#### `POST /tenants` 🟡 (법인 사용자만)
 
 | 항목 | 내용 |
-|------|------|
-| **기능** | 사용자의 은행 자격증명(현재 신한 ID/PW, loginType=1)을 CODEF에 1회 인증해 `connectedId`를 발급받고, 같은 호출에서 보유 계좌 리스트를 디스커버리. `connectedId`는 영속 저장되어 이후 `bank-accounts` 호출에서 재사용 |
-| **인증** | 필수 |
-| **경로 변수** | `tenantId`: UUID (`GET /me`의 `defaultTenantId`) |
-| **주의** | **신한은 5회 PW 오류 시 인터넷뱅킹 자체가 잠김.** 사용자가 입력 실수해도 무한 retry 금지. 클라이언트도 시도 횟수 추적 권장 |
+|---|---|
+| **기능** | 법인 사용자가 BRN 기반 tenant 명시 생성. 개인 사용자는 `/me` 가 자동 발급 |
+| **Body** | `{ legalName, displayName, bizRegNo? }` — bizRegNo 는 10자리 숫자 |
+| **응답 201** | `{ id, legalName, displayName }` |
+| **에러** | 409 `CONFLICT` (BRN 중복), 422 `VALIDATION_ERROR` (BRN 형식) |
 
-**요청 본문**:
-```json
-{
-  "organization":  "0088",
-  "loginId":       "shinhan_internet_banking_id",
-  "loginPassword": "shinhan_password",
-  "birthDate":     "19950101"
-}
-```
-- `organization`: 정확히 4자 (CODEF 기관코드, 신한=`0088`)
-- `birthDate`: 선택. 신한이 PW 오류 누적 시 추가 검증 요구하면 다음 시도부터 포함
+### 5.2 은행 연결
 
-**응답 200**:
-```json
-{
-  "connectionId": "uuid",
-  "accounts": [
-    { "accountNumber": "110226771592", "accountName": "신한투자증권+증권거래예금", "balance": "120" },
-    { "accountNumber": "110443478154", "accountName": "TEENS+PLUS통장",            "balance": "417210" }
-  ]
-}
-```
-
-| 에러 | HTTP | code | 의미/대응 |
-|------|------|------|----------|
-| 비멤버 tenant | 403 | `FORBIDDEN` | 다른 사용자의 tenantId. `GET /me/tenants`로 본인 것 확인 |
-| `loginId`/`loginPassword` 누락 | 422 | `VALIDATION_ERROR` | form 재검증 |
-| `organization` 4자 아님 | 422 | `VALIDATION_ERROR` | |
-| CODEF 인증 실패 (잘못된 ID/PW 등) | 502 | `CODEF_ACCOUNT_ERROR` | 응답 message에 "lock" 포함 시 잠금 임박 → 사용자에게 강한 경고 |
-| CODEF account-list API 실패 | 502 | `CODEF_API_ERROR` | 일시적 외부 장애. 재시도 가능 |
-
-> **보안 트레이드오프 (Phase 0)**: 사용자의 은행 평문 비밀번호가 백엔드 Lambda 메모리를 잠시 경유합니다. RSA-PKCS1로 즉시 암호화 + 로그 미포함 + 즉시 스코프 해제로 노출 표면 최소화. 사용자에게 "이 정보는 거래내역 조회 목적으로만 사용되며 평문으로 저장되지 않음"을 명시하는 동의 화면 권장. Phase 1에서 인증서 팝업/간편인증으로 교체 예정 (`docs/STATUS.md`).
-
----
-
-### 5.6 `POST /tenants/{tenantId}/bank-accounts` 🟢 External
+#### `POST /tenants/{tenantId}/bank-connections` 🟢
 
 | 항목 | 내용 |
-|------|------|
-| **기능** | `bank-connections` 응답의 `accounts` 배열에서 사용자가 선택한 계좌를 모니터링 대상으로 등록. 자격증명 재입력 없이 캐시된 `connectedId`가 자동 결합 |
-| **인증** | 필수 |
+|---|---|
+| **기능** | CODEF 에 은행 자격증명 1회 인증 → `connectedId` 발급 + 보유 계좌 디스커버리. **신한 5회 PW 오류 → 인뱅 잠금. 무한 retry 금지** |
+| **Body** | `{ organization, loginId, loginPassword, birthDate? }` |
+| **응답 200** | `{ connectionId, accounts: [{ accountNumber, accountName, balance }] }` |
+| **에러** | 502 `CODEF_ACCOUNT_ERROR` (메시지에 "lock" 포함 시 잠금 임박 → 즉시 경고), 502 `CODEF_API_ERROR` |
 
-**요청 본문**:
-```json
-{
-  "organization":  "0088",
-  "accountNumber": "110443478154"
-}
-```
-
-**응답 201**:
-```json
-{
-  "id":            "uuid",
-  "tenantId":      "881efe03-...",
-  "organization":  "0088",
-  "accountNumber": "110443478154",
-  "isActive":      true
-}
-```
-
-| 에러 | HTTP | code | 의미 |
-|------|------|------|------|
-| 비멤버 tenant | 403 | `FORBIDDEN` | |
-| 해당 `(tenantId, organization)`에 사전 connection 없음 | 422 | `NO_BANK_CONNECTION` | 먼저 `POST /bank-connections` 호출 필요 |
-| `organization` 4자 아님 / `accountNumber` 빈 문자열 | 422 | `VALIDATION_ERROR` | |
-| 동일 `(tenantId, organization, accountNumber)` 이미 등록 | 409 | `CONFLICT` | UI에서 "이미 등록된 계좌" 표시 |
-
----
-
-### 5.7 `GET /tenants/{tenantId}/journal/entries` 🟢 External
+#### `POST /tenants/{tenantId}/bank-accounts` 🟢
 
 | 항목 | 내용 |
-|------|------|
-| **기능** | tenant의 분개 결과를 날짜 범위로 조회. CODEF가 수집·Bedrock이 분류한 entries + lines 반환 |
-| **인증** | 필수 |
+|---|---|
+| **기능** | bank-connections 의 accounts 에서 선택한 계좌를 모니터링 대상으로 등록. 자격증명 재입력 불필요 |
+| **Body** | `{ organization, accountNumber }` |
+| **응답 201** | `{ id, tenantId, organization, accountNumber, isActive }` |
+| **에러** | 422 `NO_BANK_CONNECTION` (먼저 bank-connections 필요), 409 `CONFLICT` (중복 등록) |
 
-**요청 쿼리**:
-```
-?from=YYYY-MM-DD          (필수)
-&to=YYYY-MM-DD            (필수)
-&limit=N                  (선택, 1–100, default 20)
-&offset=N                 (선택, default 0)
-```
+### 5.3 분개 (Unified Entries)
 
-**응답 200** (실제 라이브):
+> 이전의 `/journal/entries` + `/journal/drafts` + `/uncertain` 은 모두 **단일 `/entries` 로 통합**되었다 (migration 0023). 모든 분개는 한 endpoint 에서 `confidenceStatus` 필드로 구분된다.
+
+#### `GET /tenants/{tenantId}/entries` 🟢
+
+| 항목 | 내용 |
+|---|---|
+| **기능** | 모든 분개 (certain + uncertain + discarded) 를 confidenceStatus 라벨과 함께 반환. 별도 토글 없음 |
+| **쿼리** | `from` (필수), `to` (필수), `limit` (1–500, default 20), `offset` (default 0), `confidenceStatus` (`certain` \| `uncertain` \| `discarded` \| `all`, default `all`) |
+
+응답 200:
 ```json
 {
   "entries": [
     {
-      "id":           "d3d1e1a0-8f30-486d-8b57-e3712a29f52d",
-      "entryDate":    "2026-05-10",
-      "source":       "codef_bank",
-      "sourceRefId":  "1dc13113-3871-4995-889e-8569a30430b9",
-      "description":  "신한체",
-      "aiConfidence": 0.6,
-      "aiModel":      "global.anthropic.claude-sonnet-4-6",
+      "id": "<uuid>",
+      "tenantId": "<uuid>",
+      "entryDate": "2026-04-15",
+      "postingDate": "2026-05-13",
+      "source": "codef_bank",
+      "sourceRefId": "<uuid>",
+      "description": "스타벅스 강남점",
+      "status": "posted",
+      "confidenceStatus": "certain",
+      "confidence": 0.92,
+      "origin": "ai",
+      "syncRunId": "<uuid>",
+      "aiModel": "global.anthropic.claude-sonnet-4-6",
+      "createdAt": "2026-04-15T...",
+      "createdBy": "<uuid>",
       "lines": [
-        { "lineNo": 1, "accountCode": "5401", "debit": 5000, "credit": 0,    "memo": null },
-        { "lineNo": 2, "accountCode": "1002", "debit": 0,    "credit": 5000, "memo": null }
+        { "lineNo": 1, "accountCode": "5101", "accountName": "복리후생비", "accountType": "expense", "debit": 6500, "credit": 0, "memo": null },
+        { "lineNo": 2, "accountCode": "1001", "accountName": "현금",       "accountType": "asset",   "debit": 0,    "credit": 6500, "memo": null }
       ]
     }
-  ]
+  ],
+  "accountBalances": [ { id, organization, accountNumber, currentBalance, withdrawable, currency, syncedAt, isStale } ],
+  "uncertain": {
+    "count": 5,
+    "message": "AI가 5건을 확신 없이 분류했습니다. confidenceStatus=\"uncertain\" 인 항목을 검토/수정/확정해 주세요.",
+    "confirmEndpoint": "/tenants/{tenantId}/entries/{entryId}/confirm",
+    "discardEndpoint": "/tenants/{tenantId}/entries/{entryId}/discard",
+    "patchEndpoint":   "/tenants/{tenantId}/entries/{entryId}"
+  }
 }
 ```
 
-| 필드 | 의미 |
-|------|------|
-| `source` | `codef_bank` (자동 수집) 또는 `manual` (수동 입력) |
-| `sourceRefId` | source가 `codef_bank`이면 raw_transactions.id. 디버깅용 |
-| `aiModel` | `global.anthropic.claude-sonnet-4-6` (Bedrock) — dev/prod 모두 실 LLM 사용 |
-| `aiConfidence` | 0.0–1.0. 낮을수록 사용자 정정 권장 |
-
-| 에러 | HTTP | code |
-|------|------|------|
-| 비멤버 tenant | 403 | `FORBIDDEN` |
-| `from`/`to` 누락 / `limit` 1–100 벗어남 | 422 | `VALIDATION_ERROR` |
-
----
-
-### 5.8 `POST /tenants/{tenantId}/journal/classify` 🟡 Advanced
+#### `PATCH /tenants/{tenantId}/entries/{entryId}` 🟢
 
 | 항목 | 내용 |
-|------|------|
-| **기능** | 거래 1건을 즉시 동기 분류해 `journal_entries`에 저장. 보통은 **CODEF 자동 파이프라인이 처리하므로 프론트엔드에서 호출할 일이 거의 없음**. 사용자가 수동으로 거래를 분개하고 싶을 때만 사용 (예: 현금 거래) |
-| **인증** | 필수. 멱등성 키 권장 |
+|---|---|
+| **기능** | uncertain 분개의 라인을 in-place 정정. certain 항목에는 사용 불가 (회계 immutability — reverse-by 체인 미구현) |
+| **Body** | `{ "lines": [{ lineNo, accountCode, debit, credit, memo? }, ...] }` — 최소 2개, 차변 합 = 대변 합 |
+| **응답 200** | 갱신된 EntryRow (위 GET 응답과 동일 shape) |
+| **에러** | 409 `CONFLICT` (certain 항목에 PATCH), 422 `VALIDATION_ERROR` (unbalanced) |
 
-**요청 본문**:
-```json
-{
-  "date":         "2026-05-10",
-  "amount":       15000,
-  "counterparty": "Coffee Shop Inc",
-  "memo":         "Office supplies"
-}
-```
-
-**응답 201**:
-```json
-{
-  "id":           "uuid",
-  "tenantId":     "uuid",
-  "entryDate":    "2026-05-10",
-  "aiConfidence": 0.72,
-  "aiModel":      "global.anthropic.claude-sonnet-4-6",
-  "lines": [
-    { "lineNo": 1, "accountCode": "1002", "debit": 0, "credit": 0, "memo": null }
-  ]
-}
-```
-
-| 에러 | HTTP | code |
-|------|------|------|
-| 비멤버 | 403 | `FORBIDDEN` |
-| `amount=0` 등 입력 오류 | 422 | `VALIDATION_ERROR` |
-| AI 분개 결과 차/대 불일치 | 422 | `UNBALANCED_JOURNAL` |
-| AI가 모르는 account code 반환 | 422 | `INVALID_ACCOUNT_CODE` |
-| Bedrock 모델 비활성/권한 없음 | 503 | `BEDROCK_UNAVAILABLE` |
-| Bedrock throttling | 429 | `BEDROCK_THROTTLED` |
-| 일일 한도(100/user) 초과 | 429 | `BEDROCK_DAILY_LIMIT_EXCEEDED` |
-
----
-
-### 5.9 `POST /tenants/{tenantId}/journal/entries` 🟡 Advanced
+#### `POST /tenants/{tenantId}/entries/{entryId}/confirm` 🟢
 
 | 항목 | 내용 |
-|------|------|
-| **기능** | 사용자가 수동으로 분개를 입력 (회계 전문가 / AI 분류 결과 정정용). **일반 사용자 UI에는 노출 X.** 회계 전문가 모드에서만 활성화 권장 |
-| **인증** | 필수 |
+|---|---|
+| **기능** | uncertain → certain 전환. 같은 row 유지, `confidence_status` + `status` 만 갱신 |
+| **Body** | `{}` (또는 비워도 됨) |
+| **응답 200** | 갱신된 EntryRow |
+| **에러** | 409 (discarded 항목), 404 (없음) |
 
-**요청 본문**:
+#### `POST /tenants/{tenantId}/entries/{entryId}/discard` 🟢
+
+| 항목 | 내용 |
+|---|---|
+| **기능** | uncertain → discarded 전환. row 보존, 모든 집계에서 제외 |
+| **Body** | `{}` |
+| **응답 200** | 갱신된 EntryRow |
+| **에러** | 409 (certain 항목), 404 |
+
+#### `POST /tenants/{tenantId}/journal/classify` 🟡 (수동 분류)
+
+| 항목 | 내용 |
+|---|---|
+| **기능** | 거래 1건을 즉시 동기 분류. 보통은 SSE `/fs/sync` 가 처리하므로 호출할 일 거의 없음 |
+| **Body** | `{ date, amount, counterparty, memo }` |
+| **응답 201** | 저장된 EntryRow |
+| **에러** | 429 `BEDROCK_DAILY_LIMIT_EXCEEDED` (사용자별 100/일), 429 `BEDROCK_THROTTLED`, 503 `BEDROCK_UNAVAILABLE` |
+| **권장** | `Idempotency-Key` 헤더 |
+
+#### `POST /tenants/{tenantId}/journal/entries` 🟡 (수동 분개)
+
+| 항목 | 내용 |
+|---|---|
+| **기능** | 회계 전문가가 수동으로 분개를 입력 |
+| **Body** | `{ entryDate, description, lines: [...] }` — 최소 2개 line, balanced |
+| **응답 201** | 저장된 EntryRow |
+| **에러** | 422 `UNBALANCED_JOURNAL`, 422 `INVALID_JOURNAL_LINE`, 422 `INVALID_ACCOUNT_CODE` |
+
+### 5.4 재무제표 (모두 AmountBreakdown 반환)
+
+#### `GET /tenants/{tenantId}/reports/pnl` 🟢
+
+| 항목 | 내용 |
+|---|---|
+| **쿼리** | `from`, `to` (필수, `YYYY-MM-DD`) |
+
+응답 200:
 ```json
 {
-  "entryDate":   "2026-05-02",
-  "description": "Office supplies purchase",
-  "lines": [
-    { "lineNo": 1, "accountCode": "5401", "debit": 10000, "credit": 0 },
-    { "lineNo": 2, "accountCode": "1002", "debit": 0,     "credit": 10000 }
+  "from": "2026-04-01", "to": "2026-04-30", "currency": "KRW",
+  "revenue":          { "items": [...], "subtotal": { certain, uncertain, total } },
+  "cogs":             { "items": [...], "subtotal": {...} },
+  "grossProfit":      { certain, uncertain, total },
+  "operatingExpenses":{ "items": [...], "subtotal": {...} },
+  "operatingIncome":  { certain, uncertain, total },
+  "nonOperating":     { "items": [...], "subtotal": {...} },
+  "netIncomeBeforeTax": { certain, uncertain, total },
+  "incomeTax":        { certain, uncertain, total },
+  "netIncome":        { certain, uncertain, total },
+  "metadata": {
+    "generatedAt": "...", "accountingStandard": "K-IFRS",
+    "uncertainEntryCount": 23,
+    "note": "23 entries are AI-suggested and not yet user-confirmed. Their amounts are included in every total as the \"uncertain\" breakdown; \"certain\" is the audit-grade subset."
+  }
+}
+```
+
+`items[].amount` 도 동일하게 `{ certain, uncertain, total }`.
+
+#### `GET /tenants/{tenantId}/reports/balance-sheet` 🟢
+
+| 쿼리 | `asOf` (필수) |
+
+응답:
+```json
+{
+  "asOf": "2026-04-30", "currency": "KRW",
+  "assets":      { "current": {...}, "nonCurrent": {...}, "total": { certain, uncertain, total } },
+  "liabilities": { "current": {...}, "nonCurrent": {...}, "total": {...} },
+  "equity":      { "items": [...], "subtotal": {...} },
+  "totalLiabilitiesAndEquity": { certain, uncertain, total },
+  "metadata": {...}
+}
+```
+
+#### `GET /tenants/{tenantId}/reports/cash-flow` 🟢
+
+| 쿼리 | `from`, `to` |
+
+응답 (indirect method):
+```json
+{
+  "from": "...", "to": "...", "currency": "KRW", "method": "indirect",
+  "operating": { "items": [...], "subtotal": {...} },
+  "investing": {...}, "financing": {...},
+  "netChange":   { certain, uncertain, total },
+  "openingCash": { certain, uncertain, total },
+  "closingCash": { certain, uncertain, total },
+  "metadata": {...}
+}
+```
+
+#### `GET /tenants/{tenantId}/reports/trial-balance` 🟢
+
+| 쿼리 | `asOf` |
+
+응답:
+```json
+{
+  "asOf": "...", "currency": "KRW",
+  "rows": [
+    { "accountCode": "1002", "accountName": "보통예금",
+      "debit":   { certain, uncertain, total },
+      "credit":  { certain, uncertain, total },
+      "balance": { certain, uncertain, total } }
+  ],
+  "totalDebit":  { certain, uncertain, total },
+  "totalCredit": { certain, uncertain, total },
+  "metadata": {...}
+}
+```
+
+### 5.5 Views
+
+#### `GET /tenants/{tenantId}/summary/monthly` 🟢
+
+| 쿼리 | `ym` (필수, `YYYY-MM`) |
+
+```json
+{
+  "ym": "2026-04",
+  "income":          { certain, uncertain, total },
+  "expense":         { certain, uncertain, total },
+  "netCashBalance":  { certain, uncertain, total },
+  "forecastNextMonth": { certain, uncertain, total },
+  "currency": "KRW"
+}
+```
+
+#### `GET /tenants/{tenantId}/accounts/balances` 🟢
+
+```json
+{
+  "balances": [
+    { "accountCode": "1002", "accountName": "보통예금", "displayName": "통장에 있는 돈",
+      "type": "asset", "currency": "KRW",
+      "balance": { certain, uncertain, total } }
   ]
 }
 ```
-- `lines`: 최소 2개. 한 line에 debit과 credit 동시 0 초과 금지. 전체 차변 합 = 대변 합
 
-**응답 201**: 저장된 entry. 
+#### `GET /tenants/{tenantId}/receivables` 🟢
 
-| 에러 | HTTP | code | 의미 |
-|------|------|------|------|
-| 비멤버 | 403 | `FORBIDDEN` | |
-| line 2개 미만 | 422 | `VALIDATION_ERROR` | |
-| 한 line이 debit + credit 동시 양수 | 422 | `INVALID_JOURNAL_LINE` | |
-| 차변 합 ≠ 대변 합 | 422 | `UNBALANCED_JOURNAL` | |
-| 모르는 account code | 422 | `INVALID_ACCOUNT_CODE` | |
+매출채권 칸반 (PENDING / DUE_SOON / OVERDUE / COLLECTED). 각 카드에 `confidenceStatus`:
+```json
+{
+  "pending": [
+    { "entryId": "...", "entryDate": "...", "counterparty": "...",
+      "amount": 1200000, "dueDate": "...", "daysOverdue": 0,
+      "confidenceStatus": "uncertain" }
+  ],
+  "dueSoon": [...], "overdue": [...], "collected": [...]
+}
+```
+
+#### `PATCH /tenants/{tenantId}/receivables/{entryId}` 🟢
+
+| Body | `{ "status": "PENDING" | "DUE_SOON" | "OVERDUE" | "COLLECTED", "collectedAt"?: "YYYY-MM-DD" }` |
+
+### 5.6 기타
+
+#### `GET /accounts/chart` 🟢
+
+K-IFRS 기본 계정과목 차트 (account_code → name 매핑). FE 가 PATCH 시 accountCode 선택 UI 에 사용.
 
 ---
 
-## 6. AppError code 빠른 참조 (전 endpoint 공통)
+## 6. SSE — `POST /tenants/{tenantId}/tax/strategy` 🟡 (별개 endpoint)
 
-| code | HTTP | 트리거 / 대응 |
-|------|------|--------------|
-| `UNAUTHORIZED` | 401 | 토큰 클레임 검증 실패. 재로그인 |
-| `FORBIDDEN` | 403 | tenant 멤버 아님. 다른 tenant 선택 |
-| `NOT_FOUND` | 404 | 리소스 없음 (Lambda unknown route 폴백) |
-| `CONFLICT` | 409 | 중복(BRN, account 등) |
-| `IDEMPOTENCY_KEY_REUSED` | 409 | 같은 키, 다른 본문 → 새 키 사용 |
-| `IDEMPOTENCY_IN_PROGRESS` | 409 | 동일 키 처리 중 → 잠시 후 재시도 |
-| `VALIDATION_ERROR` | 422 | JSON / Zod 검증 실패. 입력 폼 점검 |
-| `NO_BANK_CONNECTION` | 422 | `bank-accounts` 호출 전 `bank-connections` 필요 |
-| `INVALID_ACCOUNT_CODE` | 422 | 차트에 없는 계정코드. 회계 전문가 정정 |
-| `INVALID_JOURNAL_LINE` | 422 | 한 줄 차변·대변 동시 양수 |
+```
+Base URL: TaxStrategyFnUrl
+Body:     { "tenantId": "<uuid>", "scenario": "..." }
+```
+
+Bedrock tool_use agent (시나리오별 세무 전략 검토) 의 결과를 SSE 로 stream. tax-strategy 모듈 전용 — fs-sync 와 별개 endpoint.
+
+---
+
+## 7. 에러 코드 빠른 참조
+
+| code | HTTP | 의미 |
+|---|---|---|
+| `UNAUTHORIZED` | 401 | JWT 검증 실패 |
+| `FORBIDDEN` | 403 | tenant 멤버 아님 |
+| `NOT_FOUND` | 404 | 리소스 없음 |
+| `CONFLICT` | 409 | 중복 / 상태 전이 불가 (예: certain 에 PATCH) |
+| `IDEMPOTENCY_KEY_REUSED` | 409 | 같은 키 다른 본문 |
+| `IDEMPOTENCY_IN_PROGRESS` | 409 | 동일 키 처리 중 |
+| `VALIDATION_ERROR` | 422 | Zod / 본문 검증 실패 |
 | `UNBALANCED_JOURNAL` | 422 | 차변 합 ≠ 대변 합 |
-| `BEDROCK_DAILY_LIMIT_EXCEEDED` | 429 | 사용자별 일일 한도 초과 |
+| `INVALID_JOURNAL_LINE` | 422 | 한 line debit + credit 동시 양수 |
+| `INVALID_ACCOUNT_CODE` | 422 | 차트에 없는 계정 |
+| `NO_BANK_CONNECTION` | 422 | bank-accounts 전에 bank-connections 필요 |
+| `DATE_RANGE_TOO_WIDE` | 422 | `to - from > 366` 일 |
+| `BEDROCK_DAILY_LIMIT_EXCEEDED` | 429 | 사용자별 100/일 한도 초과 |
 | `BEDROCK_THROTTLED` | 429 | AWS Bedrock throttling |
-| `INTERNAL_ERROR` | 500 | 미처리 예외. 재시도 후에도 지속 시 백엔드 점검 |
-| `CODEF_ACCOUNT_ERROR` | 502 | CODEF 인증/account-create 실패. 메시지에 "lock" 포함 시 잠금 임박 |
-| `CODEF_API_ERROR` | 502 | CODEF 일반 API 실패 (account-list 등) |
-| `CODEF_AUTH_ERROR` | 502 | CODEF OAuth 토큰 발급 실패 (백엔드 자격증명 문제) |
-| `BEDROCK_UNAVAILABLE` | 503 | Bedrock 모델 접근 미승인/일시 장애 |
+| `INTERNAL_ERROR` | 500 | 미처리 예외 |
+| `CODEF_ACCOUNT_ERROR` | 502 | CODEF 인증 실패 (message "lock" 포함 시 잠금 임박) |
+| `CODEF_API_ERROR` | 502 | CODEF 일반 API 실패 |
+| `CODEF_AUTH_ERROR` | 502 | CODEF OAuth 토큰 발급 실패 |
+| `BEDROCK_UNAVAILABLE` | 503 | Bedrock 일시 장애 / 모델 미승인 |
 
 ---
 
-## 7. Endpoint 일람
+## 8. Endpoint 일람
 
-| Method | Path | Lambda | Auth | 라벨 |
-|--------|------|--------|------|------|
-| GET | `/health` | Identity | — | 🟢 External |
-| GET | `/me` | Identity | JWT | 🟢 External |
-| GET | `/me/tenants` | Identity | JWT | 🟢 External |
-| POST | `/tenants` | Identity | JWT | 🟡 Advanced (법인 사용자) |
-| POST | `/tenants/{tenantId}/bank-connections` | Identity | JWT | 🟢 External |
-| POST | `/tenants/{tenantId}/bank-accounts` | Identity | JWT | 🟢 External |
-| GET | `/tenants/{tenantId}/journal/entries` | Journal | JWT | 🟢 External |
-| POST | `/tenants/{tenantId}/journal/classify` | Journal | JWT | 🟡 Advanced (수동 분류) |
-| POST | `/tenants/{tenantId}/journal/entries` | Journal | JWT | 🟡 Advanced (수동 분개) |
-
-**프론트엔드 일반 사용자 UI 권장 노출**: `/health`, `/me`, `/me/tenants`, 두 `bank-*` POST, `GET /journal/entries`. 그 외(`POST /tenants`, `journal/classify`, `journal/entries POST`)는 회계 전문가 모드 또는 admin tool에서만.
-
-내부 전용(Internal) endpoint는 현재 없음 — 모든 endpoint가 외부에서 호출 가능 (인증 필수).
+| Method | Path | Base URL | Auth | 라벨 |
+|---|---|---|---|---|
+| GET | `/health` | HTTP API | — | 🟢 |
+| GET | `/me` | HTTP API | JWT | 🟢 |
+| GET | `/me/tenants` | HTTP API | JWT | 🟢 |
+| POST | `/tenants` | HTTP API | JWT | 🟡 |
+| POST | `/tenants/{tenantId}/bank-connections` | HTTP API | JWT | 🟢 |
+| POST | `/tenants/{tenantId}/bank-accounts` | HTTP API | JWT | 🟢 |
+| **POST** | **`/tenants/{tenantId}/fs/sync`** | **CodefSyncStreamFnUrl (SSE)** | **JWT** | **🟢** |
+| GET | `/tenants/{tenantId}/entries` | HTTP API | JWT | 🟢 |
+| PATCH | `/tenants/{tenantId}/entries/{entryId}` | HTTP API | JWT | 🟢 |
+| POST | `/tenants/{tenantId}/entries/{entryId}/confirm` | HTTP API | JWT | 🟢 |
+| POST | `/tenants/{tenantId}/entries/{entryId}/discard` | HTTP API | JWT | 🟢 |
+| POST | `/tenants/{tenantId}/journal/classify` | HTTP API | JWT | 🟡 |
+| POST | `/tenants/{tenantId}/journal/entries` | HTTP API | JWT | 🟡 |
+| GET | `/tenants/{tenantId}/summary/monthly` | HTTP API | JWT | 🟢 |
+| GET | `/tenants/{tenantId}/receivables` | HTTP API | JWT | 🟢 |
+| PATCH | `/tenants/{tenantId}/receivables/{entryId}` | HTTP API | JWT | 🟢 |
+| GET | `/tenants/{tenantId}/accounts/balances` | HTTP API | JWT | 🟢 |
+| GET | `/accounts/chart` | HTTP API | — | 🟢 |
+| GET | `/tenants/{tenantId}/reports/pnl` | HTTP API | JWT | 🟢 |
+| GET | `/tenants/{tenantId}/reports/balance-sheet` | HTTP API | JWT | 🟢 |
+| GET | `/tenants/{tenantId}/reports/cash-flow` | HTTP API | JWT | 🟢 |
+| GET | `/tenants/{tenantId}/reports/trial-balance` | HTTP API | JWT | 🟢 |
+| GET | `/fx/rates/usd-krw` | HTTP API | JWT | 🟢 |
+| POST | `/tenants/{tenantId}/fx/revalue` | HTTP API | JWT | 🟡 |
+| POST | `/tenants/{tenantId}/fx/accounts` | HTTP API | JWT | 🟢 |
+| GET | `/tenants/{tenantId}/fx/accounts` | HTTP API | JWT | 🟢 |
+| PATCH | `/tenants/{tenantId}/fx/accounts/{accountId}/balance` | HTTP API | JWT | 🟢 |
+| DELETE | `/tenants/{tenantId}/fx/accounts/{accountId}` | HTTP API | JWT | 🟢 |
+| POST | `/tenants/{tenantId}/fx/strategy` | FxStrategyFnUrl (SSE) | JWT | 🟢 |
+| GET / POST | `/tenants/{tenantId}/corporation-profile` | HTTP API | JWT | 🟡 |
+| GET | `/tenants/{tenantId}/filings/upcoming` | HTTP API | JWT | 🟡 |
+| GET | `/tenants/{tenantId}/filings/{id}/draft` | HTTP API | JWT | 🟡 |
+| GET | `/tenants/{tenantId}/filings/{id}/penalty-simulation` | HTTP API | JWT | 🟡 |
+| POST | `/tenants/{tenantId}/filings/{id}/recompute` | HTTP API | JWT | 🟡 |
+| GET | `/tenants/{tenantId}/withholding/pending` | HTTP API | JWT | 🟡 |
+| POST | `/tenants/{tenantId}/withholding/{id}/file` | HTTP API | JWT | 🟡 |
+| GET | `/tenants/{tenantId}/tax-invoices` | HTTP API | JWT | 🟡 |
+| POST | `/tenants/{tenantId}/tax/strategy` | TaxStrategyFnUrl (SSE) | JWT | 🟡 |
+| GET / POST | `/admin/tax-rules*` `/admin/tax-law-sync*` `/admin/tax-rule-reviews*` | HTTP API | JWT (admin group) | 🔴 |
 
 ---
 
-## 8. 변경 이력
+## 9. 변경 이력
 
 | 날짜 | 변경 |
-|------|------|
-| 2026-05-11 | Slice 6 완료: bank-connections/accounts 2단계 흐름, journal/entries GET, personal tenant 자동 발급, Bedrock dev/prod 일원화, CORS 설정, 프론트엔드 통합 가이드 형식으로 전면 재작성 |
-| 2026-05-09 | Slice 5: bank-accounts POST 추가, ai_decisions 마이그레이션 |
-| 2026-05-07 | Slice 3-4: identity (`/me`, `/tenants`, `/me/tenants`), journal (classify, entries POST) |
-
----
-
-## 부록: 미들웨어 설계 메모 (백엔드 참고용)
-
-이 섹션은 프론트엔드 통합과 무관. 백엔드 변경 시 참고:
-
-- **JWT Authorizer (API Gateway)**: `aud=UserPoolClientId` 검증. Access Token (aud 없음)은 자동 차단.
-- **Lambda 클레임 검증** (`auth-claims.mapper.ts`): `parseClaims`가 `sub`, `email`, `token_use=id`, `aud=clientId` 재검증. 실패 시 `UNAUTHORIZED`.
-- **에러 변환** (`shared/errors/http-error.ts`): 모든 throw → `toHttpErrorResponse`로 변환. 4xx는 `warn`, 5xx는 `error` 로그.
-- **분류기**: dev/prod 모두 `BedrockConverseClassifier`. `DeterministicStubClassifier`는 unit test 전용.
-
-전체 슬라이스 구조: `docs/STATUS.md`, `docs/06-slice6.ko.md`.
+|---|---|
+| 2026-05-13 | **0024 multi-currency + FX agent**: `tenant_bank_accounts`에 account_kind/currency/is_manual/manual_balance_fcy/bank_label 컬럼. `POST/GET/PATCH/DELETE /tenants/{id}/fx/accounts` 4 라우트 신설 (USD MVP, KRW 환산 표시). `POST /tenants/{id}/fx/strategy` FxStrategyFnUrl SSE 신설 (3 시나리오: exposure_summary / convert_now_check / monthly_outlook). 중복된 `/tenants/{id}/agent/search-tax-law`, `/tenants/{id}/agent/find-benefits` 제거 — `tax/strategy` 가 통합 진입점. |
+| 2026-05-13 | **0022 SSE /fs/sync**: API Gateway 폴링 패턴 → Function URL SSE. 한 호출로 fetch → 분류 → 결과 stream. `GET /fs/sync/runs/*` 전부 제거 |
+| 2026-05-12 | 0020 draft origin/status, 0019 sync_run audit, tax-strategy SSE |
+| 2026-05-11 | bank-connections/accounts 2단계 흐름, journal/entries GET, personal tenant 자동 발급 |
+| 2026-05-07 | identity (`/me`, `/tenants`, `/me/tenants`), journal classify + entries POST |

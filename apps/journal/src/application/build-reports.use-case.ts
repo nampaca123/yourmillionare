@@ -1,10 +1,15 @@
-// Use case: orchestrate report builders against PgReportsRepository aggregates.
+// Use case: orchestrate report builders against PgReportsRepository aggregates (certain/uncertain breakdown).
 
 import {
+  addBreakdown,
   buildBalanceSheet,
   buildCashFlowStatement,
   buildIncomeStatement,
   buildTrialBalance,
+  subtractBreakdown,
+  sumBreakdown,
+  zeroBreakdown,
+  type AmountBreakdown,
   type BalanceSheet,
   type CashFlowStatement,
   type IncomeStatement,
@@ -15,10 +20,14 @@ import {
 import type { ReportsRepository } from './ports/reports.repository.port.js';
 import type { VerifyTenantMembershipUseCase } from './verify-tenant-membership.use-case.js';
 
-const buildMetadata = (includesUnclassifiedDrafts: boolean): ReportMetadata => ({
+const buildMetadata = (uncertainEntryCount: number): ReportMetadata => ({
   generatedAt: new Date().toISOString(),
   accountingStandard: 'K-IFRS',
-  includesUnclassifiedDrafts,
+  uncertainEntryCount,
+  note:
+    uncertainEntryCount === 0
+      ? 'All entries are confirmed.'
+      : `${uncertainEntryCount} entries are AI-suggested and not yet user-confirmed. Their amounts are included in every total as the "uncertain" breakdown; "certain" is the audit-grade subset.`,
 });
 
 export class BuildIncomeStatementUseCase {
@@ -39,23 +48,19 @@ export class BuildIncomeStatementUseCase {
       userId: params.userId,
       cognitoSub: params.cognitoSub,
     });
-    const [rows, drafts] = await Promise.all([
+    const [rows, uncertainCount] = await Promise.all([
       this.reports.pnlAggregates({
         tenantId: params.tenantId,
         fromDate: params.fromDate,
         toDate: params.toDate,
       }),
-      this.reports.hasUnclassifiedDrafts({
-        tenantId: params.tenantId,
-        fromDate: params.fromDate,
-        toDate: params.toDate,
-      }),
+      this.reports.countUncertain({ tenantId: params.tenantId }),
     ]);
     return buildIncomeStatement({
       from: params.fromDate,
       to: params.toDate,
       rows,
-      metadata: buildMetadata(drafts),
+      metadata: buildMetadata(uncertainCount),
     });
   }
 }
@@ -77,15 +82,15 @@ export class BuildBalanceSheetUseCase {
       userId: params.userId,
       cognitoSub: params.cognitoSub,
     });
-    const [rows, drafts] = await Promise.all([
+    const [rows, uncertainCount] = await Promise.all([
       this.reports.balanceSheetAggregates({ tenantId: params.tenantId, asOf: params.asOf }),
-      this.reports.hasUnclassifiedDrafts({
-        tenantId: params.tenantId,
-        fromDate: '1970-01-01',
-        toDate: params.asOf,
-      }),
+      this.reports.countUncertain({ tenantId: params.tenantId }),
     ]);
-    return buildBalanceSheet({ asOf: params.asOf, rows, metadata: buildMetadata(drafts) });
+    return buildBalanceSheet({
+      asOf: params.asOf,
+      rows,
+      metadata: buildMetadata(uncertainCount),
+    });
   }
 }
 
@@ -106,8 +111,11 @@ export class BuildTrialBalanceUseCase {
       userId: params.userId,
       cognitoSub: params.cognitoSub,
     });
-    const rows = await this.reports.trialBalanceAggregates({ tenantId: params.tenantId, asOf: params.asOf });
-    return buildTrialBalance(params.asOf, rows, buildMetadata(false));
+    const [rows, uncertainCount] = await Promise.all([
+      this.reports.trialBalanceAggregates({ tenantId: params.tenantId, asOf: params.asOf }),
+      this.reports.countUncertain({ tenantId: params.tenantId }),
+    ]);
+    return buildTrialBalance(params.asOf, rows, buildMetadata(uncertainCount));
   }
 }
 
@@ -129,7 +137,7 @@ export class BuildCashFlowUseCase {
       userId: params.userId,
       cognitoSub: params.cognitoSub,
     });
-    const [pnlRows, openingCash, closingCash, drafts] = await Promise.all([
+    const [pnlRows, openingCash, closingCash, uncertainCount] = await Promise.all([
       this.reports.pnlAggregates({
         tenantId: params.tenantId,
         fromDate: params.fromDate,
@@ -140,20 +148,25 @@ export class BuildCashFlowUseCase {
         asOf: this.previousDay(params.fromDate),
       }),
       this.reports.cashSnapshot({ tenantId: params.tenantId, asOf: params.toDate }),
-      this.reports.hasUnclassifiedDrafts({
-        tenantId: params.tenantId,
-        fromDate: params.fromDate,
-        toDate: params.toDate,
-      }),
+      this.reports.countUncertain({ tenantId: params.tenantId }),
     ]);
-    const netIncome =
-      pnlRows.filter((r) => r.accountKind === 'revenue').reduce((s, r) => s + r.amount, 0) -
-      pnlRows.filter((r) => ['cogs', 'operating_expense'].includes(r.accountKind)).reduce((s, r) => s + r.amount, 0) +
-      pnlRows.filter((r) => r.accountKind === 'non_operating').reduce((s, r) => s + r.amount, 0) -
-      pnlRows.filter((r) => r.accountKind === 'income_tax').reduce((s, r) => s + r.amount, 0);
 
+    const revenueTotal = sumBreakdown(pnlRows.filter((r) => r.accountKind === 'revenue').map((r) => r.amount));
+    const expenseTotal = sumBreakdown(
+      pnlRows.filter((r) => ['cogs', 'operating_expense'].includes(r.accountKind)).map((r) => r.amount),
+    );
+    const nonOpTotal = sumBreakdown(pnlRows.filter((r) => r.accountKind === 'non_operating').map((r) => r.amount));
+    const taxTotal = sumBreakdown(pnlRows.filter((r) => r.accountKind === 'income_tax').map((r) => r.amount));
+
+    const netIncome = subtractBreakdown(
+      addBreakdown(subtractBreakdown(revenueTotal, expenseTotal), nonOpTotal),
+      taxTotal,
+    );
+
+    const cashDelta: AmountBreakdown = subtractBreakdown(closingCash, openingCash);
+    const wcDelta: AmountBreakdown = subtractBreakdown(cashDelta, netIncome);
     const operatingAdjustments: LineItem[] = [
-      { accountCode: '__working_capital_delta', accountName: '운전자본 변동', amount: closingCash - openingCash - netIncome },
+      { accountCode: '__working_capital_delta', accountName: '운전자본 변동', amount: wcDelta },
     ];
 
     return buildCashFlowStatement({
@@ -165,7 +178,7 @@ export class BuildCashFlowUseCase {
       financingFlows: [],
       openingCash,
       closingCash,
-      metadata: buildMetadata(drafts),
+      metadata: buildMetadata(uncertainCount),
     });
   }
 
@@ -175,3 +188,5 @@ export class BuildCashFlowUseCase {
     return d.toISOString().slice(0, 10);
   }
 }
+
+export const _exportsForTypeCheck = { zeroBreakdown };
