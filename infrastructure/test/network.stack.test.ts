@@ -76,6 +76,17 @@ describe('NetworkStack (dev)', () => {
     });
   });
 
+  it('should expose proxySg with auroraSg ingress on 5432 when proxy SG is requested', () => {
+    template.hasResourceProperties('AWS::EC2::SecurityGroup', {
+      GroupDescription: 'RDS Proxy ENI security group.',
+    });
+    template.hasResourceProperties('AWS::EC2::SecurityGroupIngress', {
+      FromPort: 5432,
+      ToPort: 5432,
+      IpProtocol: 'tcp',
+    });
+  });
+
   it('should emit no cdk-nag errors when synthesized with AwsSolutionsChecks', () => {
     const errors = Annotations.fromStack(stack).findError('*', Match.stringLikeRegexp('AwsSolutions-.*'));
     expect(errors).toEqual([]);
