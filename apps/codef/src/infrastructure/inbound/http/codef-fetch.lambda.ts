@@ -20,6 +20,7 @@ import {
   mapCodefErrorToUserMessage,
   NO_CONNECTION_USER_MESSAGE,
 } from '../../../application/codef-error-messages.js';
+import { processForeignAccount } from '../../../application/process-foreign-account.js';
 import { logger } from '../../../shared/logging/logger.js';
 
 const DEFAULT_LOOKBACK_DAYS = 2;
@@ -49,12 +50,17 @@ interface BankAccountRow {
   account_number: string;
   connected_id: string | null;
   last_balance_krw: string | null;
+  account_kind: 'krw_demand' | 'foreign';
+  currency: string;
+  is_manual: boolean;
 }
 
 interface AccountResult {
   bankAccountId: string;
   organization: string;
   accountNumber: string;
+  accountKind: 'krw_demand' | 'foreign';
+  currency: string;
   outcome: SyncRunAccountOutcome;
   codefErrorCode?: string;
   codefErrorMessage?: string;
@@ -126,6 +132,54 @@ const processAccount = async ({
   startDate,
   endDate,
 }: ProcessAccountInput): Promise<AccountResult> => {
+  if (account.account_kind === 'foreign') {
+    if (!account.connected_id) {
+      return {
+        bankAccountId: account.id,
+        organization: account.organization,
+        accountNumber: account.account_number,
+        accountKind: 'foreign',
+        currency: account.currency,
+        outcome: 'no_connection',
+        userMessage: NO_CONNECTION_USER_MESSAGE,
+        fetchedCount: 0,
+        balanceUpdated: false,
+        previousBalance:
+          account.last_balance_krw !== null ? Number.parseFloat(account.last_balance_krw) : null,
+        currentBalance: null,
+        newRawTxIds: [],
+      };
+    }
+    const fxResult = await withRlsContext({ cognitoSub: 'system', tenantId }, async (client) =>
+      processForeignAccount(
+        { client },
+        {
+          tenantId,
+          account: { ...account, connected_id: account.connected_id as string },
+          syncRunId,
+          startDate,
+          endDate,
+        },
+      ),
+    );
+    return {
+      bankAccountId: fxResult.bankAccountId,
+      organization: fxResult.organization,
+      accountNumber: fxResult.accountNumber,
+      accountKind: 'foreign',
+      currency: fxResult.currency,
+      outcome: fxResult.outcome,
+      ...(fxResult.codefErrorCode !== null ? { codefErrorCode: fxResult.codefErrorCode } : {}),
+      ...(fxResult.codefErrorMessage !== null ? { codefErrorMessage: fxResult.codefErrorMessage } : {}),
+      ...(fxResult.userMessage !== null ? { userMessage: fxResult.userMessage } : {}),
+      fetchedCount: fxResult.fetchedCount,
+      balanceUpdated: fxResult.balanceUpdated,
+      previousBalance: fxResult.previousBalance,
+      currentBalance: fxResult.currentBalance,
+      newRawTxIds: fxResult.newRawTxIds,
+    };
+  }
+
   const previousBalance = account.last_balance_krw !== null
     ? Number.parseFloat(account.last_balance_krw)
     : null;
@@ -133,6 +187,8 @@ const processAccount = async ({
     bankAccountId: account.id,
     organization: account.organization,
     accountNumber: account.account_number,
+    accountKind: 'krw_demand' as const,
+    currency: account.currency,
     fetchedCount: 0,
     balanceUpdated: false,
     previousBalance,
@@ -274,17 +330,21 @@ const loadAccounts = async (
   withRlsContext({ cognitoSub: 'system', tenantId }, async (client) => {
     if (accountIds && accountIds.length > 0) {
       const result = await client.query<BankAccountRow>(
-        `SELECT id, organization, account_number, connected_id, last_balance_krw::text
+        `SELECT id, organization, account_number, connected_id, last_balance_krw::text,
+                account_kind, currency, is_manual
            FROM tenant_bank_accounts
-          WHERE tenant_id = $1 AND is_active = TRUE AND id = ANY($2::uuid[])`,
+          WHERE tenant_id = $1 AND is_active = TRUE AND id = ANY($2::uuid[])
+            AND NOT (account_kind = 'foreign' AND is_manual = TRUE)`,
         [tenantId, accountIds],
       );
       return result.rows;
     }
     const result = await client.query<BankAccountRow>(
-      `SELECT id, organization, account_number, connected_id, last_balance_krw::text
+      `SELECT id, organization, account_number, connected_id, last_balance_krw::text,
+              account_kind, currency, is_manual
          FROM tenant_bank_accounts
-        WHERE tenant_id = $1 AND is_active = TRUE`,
+        WHERE tenant_id = $1 AND is_active = TRUE
+          AND NOT (account_kind = 'foreign' AND is_manual = TRUE)`,
       [tenantId],
     );
     return result.rows;
@@ -335,16 +395,25 @@ export const handler = async (event: FetchPayload): Promise<FetchResult> => {
       results.push(result);
     }
 
-    const allNewIds = results.flatMap((r) => r.newRawTxIds);
+    const krwResults = results.filter((r) => r.accountKind === 'krw_demand');
+    const fxResults = results.filter((r) => r.accountKind === 'foreign');
+    const krwNewIds = krwResults.flatMap((r) => r.newRawTxIds);
+    const fxNewIds = fxResults.flatMap((r) => r.newRawTxIds);
     const totalFetched = results.reduce((sum, r) => sum + r.fetchedCount, 0);
 
-    if (allNewIds.length > 0) {
+    if (krwNewIds.length > 0) {
       await sendTaskBatch(
-        allNewIds.map((id) => ({ rawTransactionId: id, tenantId, syncRunId: syncRunId ?? null })),
+        krwNewIds.map((id) => ({ rawTransactionId: id, tenantId, syncRunId: syncRunId ?? null })),
       );
 
       await withRlsContext({ cognitoSub: 'system', tenantId }, (client) =>
-        markDispatched(client, allNewIds),
+        markDispatched(client, krwNewIds),
+      );
+    }
+
+    if (fxNewIds.length > 0) {
+      await withRlsContext({ cognitoSub: 'system', tenantId }, (client) =>
+        markDispatched(client, fxNewIds),
       );
     }
 
@@ -354,14 +423,14 @@ export const handler = async (event: FetchPayload): Promise<FetchResult> => {
     }
 
     log.info(
-      { fetched: totalFetched, queued: allNewIds.length, accounts: results.length },
+      { fetched: totalFetched, queued: krwNewIds.length, fxFetched: fxNewIds.length, accounts: results.length },
       'Codef fetch complete',
     );
     return {
       tenantId,
       syncRunId: syncRunId ?? null,
       fetched: totalFetched,
-      queued: allNewIds.length,
+      queued: krwNewIds.length,
       outcomes: results.map((r) => ({ organization: r.organization, outcome: r.outcome })),
     };
   } catch (err) {

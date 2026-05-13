@@ -1,7 +1,12 @@
-// Unit tests for fx-accounts inbound zod schemas — USD whitelist + balance bounds.
+// Unit tests for fx-accounts inbound zod schemas — USD whitelist + balance bounds + CODEF discover/link.
 
 import { describe, it, expect } from 'vitest';
-import { RegisterFxAccountBodySchema, UpdateFxBalanceBodySchema } from '../src/infrastructure/inbound/http/fx-accounts.schema.js';
+import {
+  DiscoverFxAccountsQuerySchema,
+  LinkFxAccountBodySchema,
+  RegisterFxAccountBodySchema,
+  UpdateFxBalanceBodySchema,
+} from '../src/infrastructure/inbound/http/fx-accounts.schema.js';
 
 describe('RegisterFxAccountBodySchema', () => {
   it('should accept a USD account with a positive balance and an optional label', () => {
@@ -49,6 +54,56 @@ describe('UpdateFxBalanceBodySchema', () => {
 
   it('should reject a missing balance', () => {
     const result = UpdateFxBalanceBodySchema.safeParse({});
+
+    expect(result.success).toBe(false);
+  });
+});
+
+describe('DiscoverFxAccountsQuerySchema', () => {
+  it('should accept a 4-digit CODEF organization code', () => {
+    const result = DiscoverFxAccountsQuerySchema.safeParse({ organization: '0088' });
+
+    expect(result.success).toBe(true);
+  });
+
+  it('should reject a non-4-digit organization code', () => {
+    const tooShort = DiscoverFxAccountsQuerySchema.safeParse({ organization: '88' });
+    const nonDigits = DiscoverFxAccountsQuerySchema.safeParse({ organization: 'SHIN' });
+
+    expect(tooShort.success).toBe(false);
+    expect(nonDigits.success).toBe(false);
+  });
+
+  it('should reject a missing organization', () => {
+    const result = DiscoverFxAccountsQuerySchema.safeParse({});
+
+    expect(result.success).toBe(false);
+  });
+});
+
+describe('LinkFxAccountBodySchema', () => {
+  it('should accept a valid organization with an account number and optional label', () => {
+    const result = LinkFxAccountBodySchema.safeParse({
+      organization: '0088',
+      accountNumber: '110443478154',
+      bankLabel: 'Shinhan USD',
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it('should reject a missing account number', () => {
+    const result = LinkFxAccountBodySchema.safeParse({ organization: '0088' });
+
+    expect(result.success).toBe(false);
+  });
+
+  it('should reject a bank label longer than 40 characters', () => {
+    const result = LinkFxAccountBodySchema.safeParse({
+      organization: '0088',
+      accountNumber: '110443478154',
+      bankLabel: 'x'.repeat(41),
+    });
 
     expect(result.success).toBe(false);
   });

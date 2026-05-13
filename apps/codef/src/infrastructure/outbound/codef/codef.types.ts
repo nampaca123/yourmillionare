@@ -52,3 +52,21 @@ export interface FetchTransactionsResult {
   transactions: RawBankTransaction[];
   balance: AccountBalanceSnapshot | null;
 }
+
+export interface RawForeignTransaction {
+  externalId: string;
+  occurredAt: Date;
+  fcyAmount: number;
+  counterparty?: string;
+  rawPayload: CodefTxRow;
+}
+
+export interface ForeignAccountBalanceSnapshot {
+  currentBalanceFcy: number;
+  syncedAt: Date;
+}
+
+export interface FetchForeignTransactionsResult {
+  transactions: RawForeignTransaction[];
+  balance: ForeignAccountBalanceSnapshot | null;
+}
