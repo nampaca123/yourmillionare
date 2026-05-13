@@ -2,7 +2,14 @@
 
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { closeSseStream, verifyJwt, type SseSink } from '@ym/agent-core';
+import {
+  closeSseStream,
+  withStreamingErrorBoundary,
+  type SseSink,
+  type StreamingFunctionUrlEvent,
+  type StreamingResponseStream,
+} from '@ym/agent-core';
+import { verifyJwt } from '@ym/shared-auth';
 import {
   BedrockConverseClassifier,
   DeterministicStubClassifier,
@@ -53,16 +60,8 @@ const RequestBodySchema = z
   })
   .strict();
 
-interface ResponseStream extends SseSink {
-  setContentType?(type: string): void;
-}
-
-interface FunctionUrlEvent {
-  rawPath?: string;
-  body?: string;
-  isBase64Encoded?: boolean;
-  headers?: Record<string, string | undefined>;
-}
+type ResponseStream = StreamingResponseStream;
+type FunctionUrlEvent = StreamingFunctionUrlEvent;
 
 interface BankAccountRow {
   id: string;
@@ -712,6 +711,7 @@ interface AwsLambdaStreamingGlobal {
   ): (event: FunctionUrlEvent, responseStream: ResponseStream) => Promise<void>;
 }
 
+const guardedHandler = withStreamingErrorBoundary({ path: '/fs/sync' }, handlerImpl);
 const streamify = (globalThis as unknown as { awslambda?: AwsLambdaStreamingGlobal }).awslambda?.streamifyResponse;
 
-export const handler = streamify ? streamify(handlerImpl) : handlerImpl;
+export const handler = streamify ? streamify(guardedHandler) : guardedHandler;

@@ -10,8 +10,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1041.0",
-    "@ym/shared-errors": "*",
-    "aws-jwt-verify": "^5.0.0"
+    "@ym/shared-errors": "*"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.146",

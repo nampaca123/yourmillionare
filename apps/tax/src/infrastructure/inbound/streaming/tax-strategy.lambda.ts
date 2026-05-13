@@ -3,17 +3,21 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
-  closeSseStream,
   runAgent,
-  verifyJwt,
+  withStreamingErrorBoundary,
   writeSseEvent,
+  type StreamingFunctionUrlEvent,
+  type StreamingResponseStream,
   type Tool,
 } from '@ym/agent-core';
+import { verifyJwt } from '@ym/shared-auth';
 import { BedrockKbClient } from '@ym/tax-domain';
-import { ValidationError, toHttpErrorResponse, AppError } from '@ym/shared-errors';
+import { ValidationError } from '@ym/shared-errors';
 import { getPool } from '../../outbound/pg/pg-pool.client.js';
 import { buildSearchTaxLawTool } from '../../../application/tools/search-tax-law.tool.js';
 import { buildGetFilingDraftTool } from '../../../application/tools/get-filing-draft-detail.tool.js';
+import { buildComputePenaltyTool } from '../../../application/tools/compute-penalty-scenario.tool.js';
+import { buildCheckBenefitEligibilityTool } from '../../../application/tools/check-benefit-eligibility.tool.js';
 import {
   TAX_SCENARIOS,
   buildContext,
@@ -29,18 +33,8 @@ const RequestBodySchema = z
   })
   .strict();
 
-interface ResponseStream {
-  write(chunk: string): boolean;
-  end(cb?: () => void): void;
-  setContentType?(type: string): void;
-}
-
-interface FunctionUrlEvent {
-  rawPath?: string;
-  body?: string;
-  isBase64Encoded?: boolean;
-  headers?: Record<string, string | undefined>;
-}
+type ResponseStream = StreamingResponseStream;
+type FunctionUrlEvent = StreamingFunctionUrlEvent;
 
 const SCENARIO_PATH_PARAM_RE = /^\/tenants\/([0-9a-f-]+)\/tax\/strategy\/?$/i;
 
@@ -50,99 +44,94 @@ const decodeBody = (event: FunctionUrlEvent): string => {
   return event.body;
 };
 
+const HEARTBEAT_INTERVAL_MS = 10_000;
+const FINAL_TEXT_MAX_LENGTH = 1500;
+const MAX_AGENT_ITERATIONS = 12;
+const MAX_AGENT_TOKENS = 16_384;
+
 const handlerImpl = async (event: FunctionUrlEvent, responseStream: ResponseStream): Promise<void> => {
   const runId = randomUUID();
   const startedAt = Date.now();
-  let toolCalls = 0;
 
-  try {
-    responseStream.setContentType?.('text/event-stream');
+  responseStream.setContentType?.('text/event-stream');
 
-    const claims = await verifyJwt(event.headers?.authorization ?? event.headers?.Authorization);
+  const claims = await verifyJwt(event.headers?.authorization ?? event.headers?.Authorization);
 
-    const bodyText = decodeBody(event);
-    let body: unknown = {};
-    if (bodyText) {
-      try { body = JSON.parse(bodyText); }
-      catch { throw new ValidationError('Request body is not valid JSON'); }
-    }
-
-    const parsed = RequestBodySchema.safeParse(body);
-    if (!parsed.success) {
-      throw new ValidationError(`Invalid request: ${parsed.error.issues.map((i) => i.message).join(', ')}`);
-    }
-
-    const pathMatch = SCENARIO_PATH_PARAM_RE.exec(event.rawPath ?? '');
-    if (pathMatch && pathMatch[1] && pathMatch[1].toLowerCase() !== parsed.data.tenantId.toLowerCase()) {
-      throw new ValidationError('tenantId mismatch between path and body');
-    }
-    if (!isTaxScenario(parsed.data.scenario)) {
-      throw new ValidationError(`Unknown scenario: ${parsed.data.scenario}`);
-    }
-
-    const tenantId = parsed.data.tenantId;
-    const ctx = { tenantId, userId: claims.cognitoSub, cognitoSub: claims.cognitoSub };
-
-    writeSseEvent(responseStream, { type: 'started', runId, scenario: parsed.data.scenario });
-
-    const agentContext = await buildContext({
-      pool: getPool(),
-      tenantId,
-      cognitoSub: claims.cognitoSub,
-      scenario: parsed.data.scenario,
-    });
-    writeSseEvent(responseStream, { type: 'context_ready', keys: agentContext.contextKeys });
-
-    const kbClient = new BedrockKbClient();
-    const tools: Tool[] = [
-      buildSearchTaxLawTool(kbClient) as Tool,
-      buildGetFilingDraftTool(getPool()) as Tool,
-    ];
-
-    const heartbeat = setInterval(() => {
-      // Real data line — Function URL counts comments differently in the 30s no-activity window.
-      responseStream.write(`data: {"type":"heartbeat","ts":${Date.now()}}\n\n`);
-    }, 10_000);
-    let result;
+  const bodyText = decodeBody(event);
+  let body: unknown = {};
+  if (bodyText) {
     try {
-      result = await runAgent({
-        systemPrompt: getSystemPrompt(),
-        userMessage: buildUserMessage(parsed.data.scenario, agentContext),
-        tools,
-        ctx,
-        onEvent: (e) => writeSseEvent(responseStream, e),
-        maxIterations: 8,
-        maxTokens: 4096,
-      });
-    } finally {
-      clearInterval(heartbeat);
+      body = JSON.parse(bodyText);
+    } catch {
+      throw new ValidationError('Request body is not valid JSON');
     }
-    toolCalls = result.toolCalls;
-
-    writeSseEvent(responseStream, {
-      type: 'final',
-      summary: result.finalText.slice(0, 500),
-      metadata: { tokens: { input: result.inputTokens, output: result.outputTokens } },
-    });
-    writeSseEvent(responseStream, {
-      type: 'done',
-      durationMs: Date.now() - startedAt,
-      toolCalls,
-      tokens: { input: result.inputTokens, output: result.outputTokens },
-    });
-  } catch (err) {
-    const message = err instanceof AppError ? err.userMessage : err instanceof Error ? err.message : 'internal error';
-    const recoverable = err instanceof AppError ? err.statusCode < 500 : false;
-    writeSseEvent(responseStream, { type: 'error', reason: message, recoverable });
-    writeSseEvent(responseStream, { type: 'done', durationMs: Date.now() - startedAt, toolCalls });
-    if (!(err instanceof AppError)) {
-      const mapped = toHttpErrorResponse(err, { path: event.rawPath ?? '/tax/strategy' });
-      // eslint-disable-next-line no-console
-      console.error('tax-strategy unhandled', mapped);
-    }
-  } finally {
-    await closeSseStream(responseStream);
   }
+
+  const parsed = RequestBodySchema.safeParse(body);
+  if (!parsed.success) {
+    throw new ValidationError(
+      `Invalid request: ${parsed.error.issues.map((i) => i.message).join(', ')}`,
+    );
+  }
+
+  const pathMatch = SCENARIO_PATH_PARAM_RE.exec(event.rawPath ?? '');
+  if (pathMatch && pathMatch[1] && pathMatch[1].toLowerCase() !== parsed.data.tenantId.toLowerCase()) {
+    throw new ValidationError('tenantId mismatch between path and body');
+  }
+  if (!isTaxScenario(parsed.data.scenario)) {
+    throw new ValidationError(`Unknown scenario: ${parsed.data.scenario}`);
+  }
+
+  const tenantId = parsed.data.tenantId;
+  const ctx = { tenantId, userId: claims.cognitoSub, cognitoSub: claims.cognitoSub };
+
+  writeSseEvent(responseStream, { type: 'started', runId, scenario: parsed.data.scenario });
+
+  const agentContext = await buildContext({
+    pool: getPool(),
+    tenantId,
+    cognitoSub: claims.cognitoSub,
+    scenario: parsed.data.scenario,
+  });
+  writeSseEvent(responseStream, { type: 'context_ready', keys: agentContext.contextKeys });
+
+  const kbClient = new BedrockKbClient();
+  const tools: Tool[] = [
+    buildSearchTaxLawTool(kbClient) as Tool,
+    buildGetFilingDraftTool(getPool()) as Tool,
+    buildComputePenaltyTool() as Tool,
+    buildCheckBenefitEligibilityTool() as Tool,
+  ];
+
+  const heartbeat = setInterval(() => {
+    responseStream.write(`data: {"type":"heartbeat","ts":${Date.now()}}\n\n`);
+  }, HEARTBEAT_INTERVAL_MS);
+  let result;
+  try {
+    result = await runAgent({
+      systemPrompt: getSystemPrompt(),
+      userMessage: buildUserMessage(parsed.data.scenario, agentContext),
+      tools,
+      ctx,
+      onEvent: (e) => writeSseEvent(responseStream, e),
+      maxIterations: MAX_AGENT_ITERATIONS,
+      maxTokens: MAX_AGENT_TOKENS,
+    });
+  } finally {
+    clearInterval(heartbeat);
+  }
+
+  writeSseEvent(responseStream, {
+    type: 'final',
+    summary: result.finalText.slice(0, FINAL_TEXT_MAX_LENGTH),
+    metadata: { tokens: { input: result.inputTokens, output: result.outputTokens } },
+  });
+  writeSseEvent(responseStream, {
+    type: 'done',
+    durationMs: Date.now() - startedAt,
+    toolCalls: result.toolCalls,
+    tokens: { input: result.inputTokens, output: result.outputTokens },
+  });
 };
 
 interface AwsLambdaStreamingGlobal {
@@ -151,6 +140,7 @@ interface AwsLambdaStreamingGlobal {
   ): (event: FunctionUrlEvent, responseStream: ResponseStream) => Promise<void>;
 }
 
+const guardedHandler = withStreamingErrorBoundary({ path: '/tax/strategy' }, handlerImpl);
 const streamify = (globalThis as unknown as { awslambda?: AwsLambdaStreamingGlobal }).awslambda?.streamifyResponse;
 
-export const handler = streamify ? streamify(handlerImpl) : handlerImpl;
+export const handler = streamify ? streamify(guardedHandler) : guardedHandler;
