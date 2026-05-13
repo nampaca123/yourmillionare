@@ -35,6 +35,7 @@ export interface ApiStackProps extends StackProps {
   readonly identity: IdentityStack;
   readonly sharedKey: IKey;
   readonly codefSecret: ISecret;
+  readonly ecosSecret: ISecret;
   readonly legalSyncStateMachineArn?: string;
   readonly legalKbId?: string;
   readonly filingGeneratorFnArn?: string;
@@ -208,7 +209,7 @@ export class ApiStack extends Stack {
         DATABASE_NAME: 'yourmillionare',
         APP_REGION: region,
         LOG_LEVEL: isProd ? 'info' : 'debug',
-        ECOS_API_KEY: process.env.ECOS_API_KEY ?? '',
+        ECOS_CREDENTIAL_SECRET_ARN: props.ecosSecret.secretArn,
       },
       bundling: {
         externalModules: ['@aws-sdk/*', 'pg-native'],
@@ -221,6 +222,7 @@ export class ApiStack extends Stack {
         resources: [`arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`],
       }),
     );
+    props.ecosSecret.grantRead(fxFn);
 
     // --- Tax Lambda (HTTP) ---
     const taxFn = new NodejsFunction(this, 'TaxFn', {

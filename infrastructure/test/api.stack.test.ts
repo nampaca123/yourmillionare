@@ -62,6 +62,7 @@ const buildStack = (env: 'dev' | 'prod' = 'dev') => {
     identity,
     sharedKey: foundation.sharedKey,
     codefSecret: foundation.codefCredentialSecret,
+    ecosSecret: foundation.ecosCredentialSecret,
   });
 
   Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));
