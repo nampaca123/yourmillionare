@@ -46,6 +46,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const IDENTITY_LAMBDA_ENTRY = join(__dirname, '../../../apps/identity/src/infrastructure/inbound/http/identity.lambda.ts');
 const JOURNAL_LAMBDA_ENTRY = join(__dirname, '../../../apps/journal/src/infrastructure/inbound/http/journal.lambda.ts');
 const FX_LAMBDA_ENTRY = join(__dirname, '../../../apps/fx/src/infrastructure/inbound/http/fx.lambda.ts');
+const FX_STRATEGY_LAMBDA_ENTRY = join(__dirname, '../../../apps/fx/src/infrastructure/inbound/streaming/fx-strategy.lambda.ts');
 const TAX_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax/src/infrastructure/inbound/http/tax.lambda.ts');
 const TAX_STRATEGY_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax/src/infrastructure/inbound/streaming/tax-strategy.lambda.ts');
 const CODEF_SYNC_STREAM_LAMBDA_ENTRY = join(__dirname, '../../../apps/codef/src/infrastructure/inbound/streaming/fs-sync-stream.lambda.ts');
@@ -325,6 +326,61 @@ export class ApiStack extends Stack {
       exportName: `${id}-TaxStrategyFnUrl`,
     });
 
+    // --- FX-Strategy SSE Lambda (Function URL with response streaming, Bedrock Converse + get_extended_rate_history tool) ---
+    const fxStrategyFn = new NodejsFunction(this, 'FxStrategyFn', {
+      entry: FX_STRATEGY_LAMBDA_ENTRY,
+      handler: 'handler',
+      runtime: Runtime.NODEJS_20_X,
+      architecture: Architecture.ARM_64,
+      memorySize: 512,
+      timeout: Duration.minutes(10),
+      vpc: props.vpc,
+      vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [props.lambdaSg],
+      environment: {
+        CLUSTER_ENDPOINT: props.aurora.cluster.clusterEndpoint.hostname,
+        CLUSTER_PORT: '5432',
+        DATABASE_NAME: 'yourmillionare',
+        APP_REGION: region,
+        LOG_LEVEL: isProd ? 'info' : 'debug',
+        COGNITO_USER_POOL_ID: props.identity.userPool.userPoolId,
+        COGNITO_USER_POOL_CLIENT_ID: props.identity.userPoolClient.userPoolClientId,
+        BEDROCK_MODEL_ID: BEDROCK_STRATEGY_MODEL_ID,
+        AWS_ACCOUNT_ID: account,
+      },
+      bundling: {
+        externalModules: ['@aws-sdk/*', 'pg-native'],
+        nodeModules: ['pg'],
+      },
+    });
+    fxStrategyFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['rds-db:connect'],
+        resources: [`arn:aws:rds-db:${region}:${account}:dbuser:${props.aurora.cluster.clusterResourceIdentifier}/app_user`],
+      }),
+    );
+    fxStrategyFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: [
+          'bedrock:InvokeModel',
+          'bedrock:Converse',
+          'bedrock:ConverseStream',
+          'bedrock:GetInferenceProfile',
+        ],
+        resources: ['*'],
+      }),
+    );
+    const fxStrategyFnUrl = fxStrategyFn.addFunctionUrl({
+      authType: FunctionUrlAuthType.NONE,
+      invokeMode: InvokeMode.RESPONSE_STREAM,
+      cors: functionUrlCors,
+    });
+    new CfnOutput(this, 'FxStrategyFnUrl', {
+      value: fxStrategyFnUrl.url,
+      description: 'Function URL for fx/strategy SSE endpoint (Bearer JWT in Authorization header).',
+      exportName: `${id}-FxStrategyFnUrl`,
+    });
+
     // --- Codef-Sync SSE Lambda (Function URL with response streaming, inline CODEF fetch + Bedrock classification) ---
     const codefSyncStreamFn = new NodejsFunction(this, 'CodefSyncStreamFn', {
       entry: CODEF_SYNC_STREAM_LAMBDA_ENTRY,
@@ -517,6 +573,7 @@ export class ApiStack extends Stack {
       environment: {
         CODEF_SYNC_STREAM_FN_URL: codefSyncStreamFnUrl.url,
         TAX_STRATEGY_FN_URL: taxStrategyFnUrl.url,
+        FX_STRATEGY_FN_URL: fxStrategyFnUrl.url,
       },
       bundling: {
         externalModules: ['@aws-sdk/*'],
@@ -742,7 +799,7 @@ export class ApiStack extends Stack {
       true,
     );
 
-    for (const fn of [fxFn, taxFn, taxKnowledgeFn, taxStrategyFn]) {
+    for (const fn of [fxFn, taxFn, taxKnowledgeFn, taxStrategyFn, fxStrategyFn]) {
       NagSuppressions.addResourceSuppressions(
         fn,
         [

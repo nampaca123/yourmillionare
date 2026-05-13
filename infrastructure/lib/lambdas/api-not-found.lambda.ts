@@ -15,6 +15,11 @@ const STATIC_FUNCTION_URL_HINTS: ReadonlyArray<{
     envVar: 'TAX_STRATEGY_FN_URL',
     description: 'POST /tenants/{tenantId}/tax/strategy moved to a Lambda Function URL (SSE Response Streaming).',
   },
+  {
+    pathSuffix: '/fx/strategy',
+    envVar: 'FX_STRATEGY_FN_URL',
+    description: 'POST /tenants/{tenantId}/fx/strategy moved to a Lambda Function URL (SSE Response Streaming).',
+  },
 ];
 
 interface ApiGwV2Event {
