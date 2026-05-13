@@ -589,6 +589,10 @@ export class ApiStack extends Stack {
     for (const [method, path] of [
       [HttpMethod.GET, '/fx/rates/usd-krw'],
       [HttpMethod.POST, '/tenants/{tenantId}/fx/revalue'],
+      [HttpMethod.POST, '/tenants/{tenantId}/fx/accounts'],
+      [HttpMethod.GET, '/tenants/{tenantId}/fx/accounts'],
+      [HttpMethod.PATCH, '/tenants/{tenantId}/fx/accounts/{accountId}/balance'],
+      [HttpMethod.DELETE, '/tenants/{tenantId}/fx/accounts/{accountId}'],
     ] as [HttpMethod, string][]) {
       this.httpApi.addRoutes({
         path,

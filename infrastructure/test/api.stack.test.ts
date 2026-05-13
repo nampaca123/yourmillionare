@@ -88,8 +88,8 @@ describe('ApiStack (dev)', () => {
     template.resourceCountIs('AWS::ApiGatewayV2::Authorizer', 1);
   });
 
-  it('should create exactly 53 routes when synthesized (41 explicit + 12 catch-all = 6 verbs x 2 paths /, /{proxy+})', () => {
-    template.resourceCountIs('AWS::ApiGatewayV2::Route', 53);
+  it('should create exactly 57 routes when synthesized (45 explicit + 12 catch-all = 6 verbs x 2 paths /, /{proxy+})', () => {
+    template.resourceCountIs('AWS::ApiGatewayV2::Route', 57);
   });
 
   it('should attach not-found integration on non-OPTIONS verbs only so corsPreflight stays in charge of OPTIONS', () => {

@@ -8,6 +8,12 @@ import { GetExchangeRateUseCase } from './application/get-exchange-rate.use-case
 import { RevalueForeignBalancesUseCase } from './application/revalue-foreign-balances.use-case.js';
 import { buildFxRatesController } from './infrastructure/inbound/http/fx-rates.controller.js';
 import { buildFxRevalueController } from './infrastructure/inbound/http/fx-revalue.controller.js';
+import {
+  registerFxAccountController,
+  listFxAccountsController,
+  updateFxAccountBalanceController,
+  deactivateFxAccountController,
+} from './infrastructure/inbound/http/fx-accounts.controller.js';
 
 export type Handler = (event: APIGatewayProxyEventV2WithJWTAuthorizer) => Promise<APIGatewayProxyResultV2> | APIGatewayProxyResultV2;
 
@@ -27,6 +33,10 @@ const buildContainer = async (): Promise<Container> => {
     routes: {
       'GET /fx/rates/usd-krw': buildFxRatesController(getRate),
       'POST /tenants/{tenantId}/fx/revalue': buildFxRevalueController(revalue),
+      'POST /tenants/{tenantId}/fx/accounts': registerFxAccountController,
+      'GET /tenants/{tenantId}/fx/accounts': listFxAccountsController,
+      'PATCH /tenants/{tenantId}/fx/accounts/{accountId}/balance': updateFxAccountBalanceController,
+      'DELETE /tenants/{tenantId}/fx/accounts/{accountId}': deactivateFxAccountController,
     },
   };
 };
