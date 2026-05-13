@@ -2,7 +2,7 @@
 
 > **Audience**: 이 백엔드를 호출할 프론트엔드 개발자.
 > **단일 출처**: 이 문서만 보고 클라이언트 통합을 끝낼 수 있도록 작성됨.
-> **Last verified**: 2026-05-13 (deployed dev 환경에서 라이브 응답 캡처, migrations 0001–0023 적용).
+> **Last verified**: 2026-05-13 (deployed dev 환경에서 라이브 응답 캡처, migrations 0001–0024 적용, FxStrategyFnUrl 추가).
 
 ---
 
@@ -12,19 +12,20 @@
 HTTP API (REST)     : https://p7d9jms82f.execute-api.ap-northeast-2.amazonaws.com
 CodefSyncStreamFnUrl: https://vh3nq63kxcjcrjkabaikqrddzm0ymhbf.lambda-url.ap-northeast-2.on.aws/  (SSE)
 TaxStrategyFnUrl    : https://la3losebvhzb5yrzliyopfcl6m0qikyd.lambda-url.ap-northeast-2.on.aws/  (SSE)
+FxStrategyFnUrl     : https://cs5jf5syovxgbzv27kpdtq7ukq0gvqtp.lambda-url.ap-northeast-2.on.aws/  (SSE)
 Cognito Domain      : https://yourmillionare-dev.auth.ap-northeast-2.amazoncognito.com
 Region              : ap-northeast-2
 Auth scheme         : Cognito ID Token (Bearer), 발급은 Hosted UI 또는 SDK
 CORS allowed        : http://localhost:3000, http://localhost:5173 (env로 추가 가능)
 ```
 
-세 가지 base URL을 구분해서 호출한다:
+네 가지 base URL을 구분해서 호출한다:
 - **HTTP API** — 모든 REST endpoint (CRUD, 조회).
 - **CodefSyncStreamFnUrl** — `POST /tenants/{id}/fs/sync` 전용. text/event-stream 으로 답함.
 - **TaxStrategyFnUrl** — `POST /tenants/{id}/tax/strategy` 전용. text/event-stream.
 - **FxStrategyFnUrl** — `POST /tenants/{id}/fx/strategy` 전용. text/event-stream.
 
-CDK output (`Ym-Dev-Api.HttpApiUrl`, `Ym-Dev-Api.CodefSyncStreamFnUrl`, `Ym-Dev-Api.TaxStrategyFnUrl`)이 권위 있는 출처.
+CDK output (`Ym-Dev-Api.HttpApiUrl`, `Ym-Dev-Api.CodefSyncStreamFnUrl`, `Ym-Dev-Api.TaxStrategyFnUrl`, `Ym-Dev-Api.FxStrategyFnUrl`)이 권위 있는 출처.
 
 ---
 
@@ -492,22 +493,200 @@ P&L / BS / CF / TB / monthly summary / accounts balances / receivables 등 **모
 
 | Body | `{ "status": "PENDING" | "DUE_SOON" | "OVERDUE" | "COLLECTED", "collectedAt"?: "YYYY-MM-DD" }` |
 
-### 5.6 기타
+### 5.6 외화 계좌 (Manual FX Accounts)
+
+> **목적**: 사용자가 직접 USD 외화 잔액을 등록·갱신하면, FX 에이전트가 이 데이터(+ 추후 CODEF foreign sync)를 보고 환전 전략을 제안한다. MVP 는 USD 만 지원.
+
+#### `POST /tenants/{tenantId}/fx/accounts` 🟢
+
+새 manual USD 외화계좌 등록. `account_kind='foreign'`, `is_manual=true` 로 저장, `account_number` 는 `MANUAL-<uuid8>` 자동 부여, `organization='MANL'`.
+
+**Request body**
+
+```json
+{
+  "currency": "USD",        // literal USD only (다른 값 → 422)
+  "balance": 1500.00,        // > 0, ≤ 1e12
+  "bankLabel": "Citi USD"    // optional, 1~40 chars
+}
+```
+
+**Response 201**
+
+```json
+{
+  "accountId": "befd5013-1a7d-49e6-8ed9-fb3d8a0f676a",
+  "source": "manual",
+  "organization": "MANL",
+  "accountNumber": "MANUAL-a3e1cd55",
+  "currency": "USD",
+  "bankLabel": "Citi USD",
+  "balanceFcy": 1500,
+  "balanceKrwToday": 2226450,         // = balanceFcy × 최신 fx_observations USD/KRW closing
+  "lastSyncedAt": "2026-05-13T06:15:07.451Z"
+}
+```
+
+**에러**
+
+| 상황 | code | HTTP |
+|---|---|---|
+| `currency ≠ "USD"` 또는 balance ≤ 0 | `VALIDATION_ERROR` | 422 |
+| 동일 (`tenantId`, `organization`, `accountNumber`) 중복 — 사실상 발생 불가 (random) | `CONFLICT` | 409 |
+
+#### `GET /tenants/{tenantId}/fx/accounts` 🟢
+
+해당 테넌트의 `account_kind='foreign'` AND `is_active=true` 계좌를 모두 union 으로 반환. manual + CODEF foreign 둘 다 (현재는 manual 만).
+
+**Response 200**
+
+```json
+{
+  "accounts": [
+    {
+      "accountId": "befd5013-...",
+      "source": "manual" | "codef",
+      "organization": "MANL" | "0088",
+      "accountNumber": "MANUAL-...",
+      "currency": "USD",
+      "bankLabel": "Citi USD" | null,
+      "balanceFcy": 1500 | null,        // manual 만 보장. CODEF foreign 은 잔액 sync 시점에 따라 null 가능
+      "balanceKrwToday": 2226450 | null, // 오늘 환율 기준. fx_observations 가 비어있으면 null
+      "lastSyncedAt": "2026-05-13T..."
+    }
+  ]
+}
+```
+
+#### `PATCH /tenants/{tenantId}/fx/accounts/{accountId}/balance` 🟢
+
+manual 계좌의 외화 잔액을 사용자 입력으로 덮어쓴다. `manual_balance_synced_at` 도 `now()` 로 갱신.
+
+**Request body**
+
+```json
+{ "balance": 999.99 }   // > 0, ≤ 1e12
+```
+
+**Response 200** — `POST /fx/accounts` 와 동일 shape.
+
+**에러**
+
+| 상황 | code | HTTP |
+|---|---|---|
+| `accountId` 없음 또는 다른 tenant 소유 | `NOT_FOUND` | 404 |
+| `is_manual=false` (CODEF synced) | `CONFLICT` | 409 |
+| balance 누락 / 음수 / 초과 | `VALIDATION_ERROR` | 422 |
+
+#### `DELETE /tenants/{tenantId}/fx/accounts/{accountId}` 🟢
+
+manual 계좌 soft delete (`is_active=false`). idempotent — 이미 비활성이면 그대로 204.
+
+**Response 204** — body 없음.
+
+**에러**
+
+| 상황 | code | HTTP |
+|---|---|---|
+| 처음부터 없는 ID | `NOT_FOUND` | 404 |
+| `is_manual=false` (CODEF synced) | `CONFLICT` | 409 |
+
+---
+
+### 5.7 기타
 
 #### `GET /accounts/chart` 🟢
 
 K-IFRS 기본 계정과목 차트 (account_code → name 매핑). FE 가 PATCH 시 accountCode 선택 UI 에 사용.
 
+#### `GET /fx/rates/usd-krw?date=YYYY-MM-DD` / `?from=YYYY-MM-DD&to=YYYY-MM-DD` 🟢
+
+ECOS 매매기준율을 단일 일자 또는 범위로 조회. 미존재 일자는 PG `fx_observations` 캐시 → ECOS 폴백.
+
+#### `POST /tenants/{tenantId}/fx/revalue?asOf=YYYY-MM-DD` 🟡
+
+IAS 21 월말 외화환산 (Wave-5 stub).
+
 ---
 
-## 6. SSE — `POST /tenants/{tenantId}/tax/strategy` 🟡 (별개 endpoint)
+## 6. SSE Function URL endpoints
+
+세 SSE endpoint 는 모두 같은 이벤트 모델을 따른다 — `started → context_ready → heartbeat* → tool_call*/tool_result* → text_delta* → final → done`. 에러 발생 시 `error → done` 으로 마무리 (HTTP 200 유지, status code 는 stream 시작 후 바꿀 수 없으므로).
+
+### 6.1 `POST /tenants/{tenantId}/tax/strategy` 🟡
 
 ```
 Base URL: TaxStrategyFnUrl
-Body:     { "tenantId": "<uuid>", "scenario": "..." }
+Body:     { "tenantId": "<uuid>", "scenario": "applicable_benefits" | "upcoming_deadlines" | "yearly_filing_check" | "vat_quarter_review" | "penalty_risk_check" }
 ```
 
 Bedrock tool_use agent (시나리오별 세무 전략 검토) 의 결과를 SSE 로 stream. tax-strategy 모듈 전용 — fs-sync 와 별개 endpoint.
+
+도구 — `search_tax_law` (Bedrock KB), `get_filing_draft_detail`, `compute_penalty_scenario`, `check_benefit_eligibility`.
+
+답변 구조 (7단 마크다운): 현황 요약 / 핵심 결론 / 단계별 액션 / 숫자로 보는 예시 / 자주 하는 실수 / 세무사 상담이 필요한 경계선 / 참고 법령.
+
+### 6.2 `POST /tenants/{tenantId}/fx/strategy` 🟢
+
+```
+Base URL: FxStrategyFnUrl
+Body:     { "tenantId": "<uuid>", "scenario": "exposure_summary" | "convert_now_check" | "monthly_outlook" }
+```
+
+외화 보유 사용자에게 환전 전략을 추천하는 SSE 에이전트. 헷지·파생상품 권유 금지, "환율은 누구도 예측 불가" 면책 필수.
+
+**시나리오**
+
+| scenario | 도구 호출 | 컨텍스트 |
+|---|---|---|
+| `exposure_summary` | 0회 | 외화 잔액 + 오늘 환율 + 30일 추세 + 30일 변동성 |
+| `convert_now_check` | 0회 | 위와 동일 |
+| `monthly_outlook` | 1회 (`get_extended_rate_history`) | 위 + 90일 추세 |
+
+**Request**
+
+```http
+POST /tenants/{tid}/fx/strategy HTTP/1.1
+Authorization: Bearer <Cognito ID Token>
+Content-Type: application/json
+
+{"tenantId":"<uuid>","scenario":"convert_now_check"}
+```
+
+**Response — `text/event-stream`** (예시 시퀀스)
+
+```
+data: {"type":"started","runId":"<uuid>","scenario":"convert_now_check"}
+
+data: {"type":"context_ready","keys":["today","foreign_balances","fx_today_usd_krw","fx_trend_30d","fx_volatility_30d"]}
+
+data: {"type":"heartbeat","ts":1778654822000}                 ← 10초 간격 (Function URL idle 회피)
+
+data: {"type":"tool_call","name":"get_extended_rate_history","input":{"currency":"USD","days":90}}   ← monthly_outlook 만
+data: {"type":"tool_result","name":"get_extended_rate_history","summary":"9 observations between 2026-04-29 and 2026-05-13"}
+
+data: {"type":"text_delta","chunk":"\n\n# 💱 외환 어드바이저 리포트..."}
+data: {"type":"text_delta","chunk":"..."}                     ← 수십~수백 청크
+
+data: {"type":"final","summary":"<처음 1500자 truncated>","metadata":{"tokens":{"input":2302,"output":2334}}}
+
+data: {"type":"done","durationMs":39982,"toolCalls":0,"tokens":{"input":2302,"output":2334}}
+```
+
+**FE 구현 메모**
+
+- `final.summary` 는 **1500 자에서 잘림**. 전체 답변은 `text_delta.chunk` 를 시간 순으로 이어붙여 재조립해야 함 (Tax 와 동일).
+- 답변 구조 (7단 마크다운): 현재 노출 요약 / 핵심 결론 / 근거 / 권고 옵션 비교 / 숫자로 보는 예시 / 위험 경고 / 참고 자료.
+- 사용자가 manual USD 계좌를 하나도 등록 안 했고 CODEF foreign 도 sync 안 된 상태이면, agent 는 "외화 자산이 없습니다" 답변 — 빈 상태 처리는 FE 에서 별도 onboarding 카드로 가이드 권장.
+
+**에러**
+
+| 상황 | SSE 이벤트 |
+|---|---|
+| Authorization 헤더 없음 / 토큰 무효 | `error (UNAUTHORIZED, recoverable:true) → done` |
+| 잘못된 `scenario` | `error (VALIDATION_ERROR) → done` |
+| `tenantId` path/body 불일치 | `error (VALIDATION_ERROR) → done` |
+| Bedrock throttling / 일시 장애 | `error (BEDROCK_THROTTLED / BEDROCK_UNAVAILABLE) → done` |
 
 ---
 
