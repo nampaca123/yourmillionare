@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 
 import { CfnOutput, Duration, Stack } from 'aws-cdk-lib';
 import type { StackProps } from 'aws-cdk-lib';
-import { CorsHttpMethod, HttpApi, HttpMethod } from 'aws-cdk-lib/aws-apigatewayv2';
+import { HttpApi, HttpMethod } from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpJwtAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import type { ISecurityGroup, IVpc } from 'aws-cdk-lib/aws-ec2';
@@ -13,7 +13,8 @@ import { SubnetType } from 'aws-cdk-lib/aws-ec2';
 import type { IKey } from 'aws-cdk-lib/aws-kms';
 import { Key, KeySpec, KeyUsage } from 'aws-cdk-lib/aws-kms';
 import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
-import { Architecture, FunctionUrlAuthType, HttpMethod as LambdaHttpMethod, InvokeMode, Runtime } from 'aws-cdk-lib/aws-lambda';
+import { Architecture, FunctionUrlAuthType, InvokeMode, Runtime } from 'aws-cdk-lib/aws-lambda';
+import { buildApiGwCors, buildFunctionUrlCors } from '../config/cors.config.js';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
 import type { ISecret } from 'aws-cdk-lib/aws-secretsmanager';
@@ -48,6 +49,7 @@ const TAX_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax/src/infrastructure/i
 const TAX_STRATEGY_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax/src/infrastructure/inbound/streaming/tax-strategy.lambda.ts');
 const CODEF_SYNC_STREAM_LAMBDA_ENTRY = join(__dirname, '../../../apps/codef/src/infrastructure/inbound/streaming/fs-sync-stream.lambda.ts');
 const TAX_KNOWLEDGE_LAMBDA_ENTRY = join(__dirname, '../../../apps/tax-knowledge/src/infrastructure/inbound/http/tax-knowledge.lambda.ts');
+const API_NOT_FOUND_LAMBDA_ENTRY = join(__dirname, '../lambdas/api-not-found.lambda.ts');
 const BEDROCK_PROFILE_ID = 'global.anthropic.claude-sonnet-4-6';
 const RERANK_REGION_DEFAULT = 'ap-northeast-1';
 const RERANK_MODEL_DEFAULT = 'cohere.rerank-v3-5:0';
@@ -249,10 +251,8 @@ export class ApiStack extends Stack {
       }),
     );
 
-    const corsAllowedOrigins = (process.env.API_CORS_ALLOWED_ORIGINS ?? 'http://localhost:3000,http://localhost:5173')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const apiGwCors = buildApiGwCors({ stage: props.deploymentEnv });
+    const functionUrlCors = buildFunctionUrlCors({ stage: props.deploymentEnv });
 
     // --- Tax-Strategy SSE Lambda (Function URL with response streaming, Bedrock Converse + KB tools) ---
     const kbRegionForStrategy = process.env.BEDROCK_KB_REGION ?? region;
@@ -313,12 +313,7 @@ export class ApiStack extends Stack {
     const taxStrategyFnUrl = taxStrategyFn.addFunctionUrl({
       authType: FunctionUrlAuthType.NONE,
       invokeMode: InvokeMode.RESPONSE_STREAM,
-      cors: {
-        allowedOrigins: corsAllowedOrigins,
-        allowedMethods: [LambdaHttpMethod.POST],
-        allowedHeaders: ['authorization', 'content-type', 'idempotency-key'],
-        maxAge: Duration.hours(1),
-      },
+      cors: functionUrlCors,
     });
     new CfnOutput(this, 'TaxStrategyFnUrl', {
       value: taxStrategyFnUrl.url,
@@ -375,12 +370,7 @@ export class ApiStack extends Stack {
     const codefSyncStreamFnUrl = codefSyncStreamFn.addFunctionUrl({
       authType: FunctionUrlAuthType.NONE,
       invokeMode: InvokeMode.RESPONSE_STREAM,
-      cors: {
-        allowedOrigins: corsAllowedOrigins,
-        allowedMethods: [LambdaHttpMethod.POST],
-        allowedHeaders: ['authorization', 'content-type', 'idempotency-key'],
-        maxAge: Duration.hours(1),
-      },
+      cors: functionUrlCors,
     });
     new CfnOutput(this, 'CodefSyncStreamFnUrl', {
       value: codefSyncStreamFnUrl.url,
@@ -491,18 +481,7 @@ export class ApiStack extends Stack {
 
     this.httpApi = new HttpApi(this, 'HttpApi', {
       createDefaultStage: true,
-      corsPreflight: {
-        allowOrigins: corsAllowedOrigins,
-        allowMethods: [
-          CorsHttpMethod.GET,
-          CorsHttpMethod.POST,
-          CorsHttpMethod.PATCH,
-          CorsHttpMethod.OPTIONS,
-        ],
-        allowHeaders: ['Authorization', 'Content-Type', 'Idempotency-Key'],
-        allowCredentials: false,
-        maxAge: Duration.minutes(10),
-      },
+      corsPreflight: apiGwCors,
     });
 
     // Attach access logs to the default stage (stable CDK pattern)
@@ -522,6 +501,24 @@ export class ApiStack extends Stack {
         },
       });
     }
+
+    // --- Not-Found catch-all (gives unmatched routes a 404 with CORS headers; otherwise API GW emits 404 without CORS and the browser surfaces it as a CORS error). ---
+    const apiNotFoundFn = new NodejsFunction(this, 'ApiNotFoundFn', {
+      entry: API_NOT_FOUND_LAMBDA_ENTRY,
+      handler: 'handler',
+      runtime: Runtime.NODEJS_20_X,
+      architecture: Architecture.ARM_64,
+      memorySize: 128,
+      timeout: Duration.seconds(5),
+      environment: {
+        CODEF_SYNC_STREAM_FN_URL: codefSyncStreamFnUrl.url,
+        TAX_STRATEGY_FN_URL: taxStrategyFnUrl.url,
+      },
+      bundling: {
+        externalModules: ['@aws-sdk/*'],
+      },
+    });
+    const notFoundIntegration = new HttpLambdaIntegration('NotFoundIntegration', apiNotFoundFn);
 
     const identityIntegration = new HttpLambdaIntegration('IdentityIntegration', identityFn);
     const journalIntegration = new HttpLambdaIntegration('JournalIntegration', journalFn);
@@ -636,6 +633,18 @@ export class ApiStack extends Stack {
         authorizer: jwtAuthorizer,
       });
     }
+
+    // --- Catch-all: turns API Gateway's bare 404 (no CORS headers) into a structured 404 with CORS headers + Function URL hints for moved routes. ---
+    this.httpApi.addRoutes({
+      path: '/{proxy+}',
+      methods: [HttpMethod.ANY],
+      integration: notFoundIntegration,
+    });
+    this.httpApi.addRoutes({
+      path: '/',
+      methods: [HttpMethod.ANY],
+      integration: notFoundIntegration,
+    });
 
     // --- Outputs ---
     new CfnOutput(this, 'HttpApiUrl', { value: this.httpApi.url ?? '' });

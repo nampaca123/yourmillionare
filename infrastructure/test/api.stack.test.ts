@@ -3,7 +3,7 @@
 import { App, Aspects, Tags } from 'aws-cdk-lib';
 import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import { AwsSolutionsChecks } from 'cdk-nag';
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 
 import { FoundationStack } from '../lib/stacks/foundation.stack.js';
 import { NetworkStack } from '../lib/stacks/network.stack.js';
@@ -13,8 +13,10 @@ import { ApiStack } from '../lib/stacks/api.stack.js';
 
 const TEST_ACCOUNT = '123456789012';
 const TEST_REGION = 'ap-northeast-2';
+const ORIGINAL_CORS_ENV = process.env.API_CORS_ALLOWED_ORIGINS;
 
 const buildStack = (env: 'dev' | 'prod' = 'dev') => {
+  process.env.API_CORS_ALLOWED_ORIGINS = 'http://localhost:3000,https://dashboard.example.com';
   const app = new App();
   Tags.of(app).add('Project', 'yourmillionare');
   Tags.of(app).add('Environment', env);
@@ -85,8 +87,17 @@ describe('ApiStack (dev)', () => {
     template.resourceCountIs('AWS::ApiGatewayV2::Authorizer', 1);
   });
 
-  it('should create exactly 41 routes when synthesized (POST /fs/sync moved to SSE Function URL)', () => {
-    template.resourceCountIs('AWS::ApiGatewayV2::Route', 41);
+  it('should create exactly 43 routes when synthesized (41 explicit + 2 catch-all `/` and `/{proxy+}` for CORS-friendly 404s)', () => {
+    template.resourceCountIs('AWS::ApiGatewayV2::Route', 43);
+  });
+
+  it('should attach the not-found integration to the catch-all routes for unmatched paths', () => {
+    template.hasResourceProperties('AWS::ApiGatewayV2::Route', {
+      RouteKey: 'ANY /{proxy+}',
+    });
+    template.hasResourceProperties('AWS::ApiGatewayV2::Route', {
+      RouteKey: 'ANY /',
+    });
   });
 
   it('should create 1 Lambda function for the identity handler when synthesized', () => {
@@ -137,6 +148,11 @@ describe('ApiStack (prod)', () => {
 
   beforeAll(() => {
     template = buildStack('prod').template;
+  });
+
+  afterAll(() => {
+    if (ORIGINAL_CORS_ENV === undefined) delete process.env.API_CORS_ALLOWED_ORIGINS;
+    else process.env.API_CORS_ALLOWED_ORIGINS = ORIGINAL_CORS_ENV;
   });
 
   it('should not set JOURNAL_STUB_CLASSIFIER on Journal Lambda in prod', () => {
