@@ -17,6 +17,7 @@ import {
   IpAddresses,
   NatProvider,
   NatTrafficDirection,
+  Peer,
   Port,
   SecurityGroup,
   SubnetType,
@@ -138,6 +139,11 @@ export class NetworkStack extends Stack {
     });
     this.auroraSg.addIngressRule(this.proxySg, Port.tcp(5432), 'Proxy on 5432');
     this.proxySg.addIngressRule(this.lambdaSg, Port.tcp(5432), 'Lambda on 5432');
+    this.proxySg.addEgressRule(
+      Peer.ipv4(vpcCidr),
+      Port.allTraffic(),
+      'Proxy outbound to VPC: Aurora 5432 + SecretsManager/KMS endpoints 443',
+    );
 
     const endpointSubnets = isProd
       ? { subnetType: SubnetType.PRIVATE_ISOLATED }
