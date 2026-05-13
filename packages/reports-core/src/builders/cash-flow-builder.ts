@@ -1,23 +1,33 @@
-// Cash flow builder (indirect method) — net income + working-capital deltas + non-cash adjustments.
+// Cash flow builder (indirect) — net income + working-capital deltas. Cash carries certain/uncertain breakdown.
 
-import type { CashFlowStatement, LineItem, ReportMetadata, SectionBlock } from '../types.js';
+import {
+  addBreakdown,
+  subtractBreakdown,
+  sumBreakdown,
+  zeroBreakdown,
+  type AmountBreakdown,
+  type CashFlowStatement,
+  type LineItem,
+  type ReportMetadata,
+  type SectionBlock,
+} from '../types.js';
 
 const EPSILON_KRW = 1;
 
 const section = (items: ReadonlyArray<LineItem>): SectionBlock => ({
   items,
-  subtotal: items.reduce((s, i) => s + i.amount, 0),
+  subtotal: sumBreakdown(items.map((i) => i.amount)),
 });
 
 export interface CashFlowInput {
   readonly from: string;
   readonly to: string;
-  readonly netIncome: number;
+  readonly netIncome: AmountBreakdown;
   readonly operatingAdjustments: ReadonlyArray<LineItem>;
   readonly investingFlows: ReadonlyArray<LineItem>;
   readonly financingFlows: ReadonlyArray<LineItem>;
-  readonly openingCash: number;
-  readonly closingCash: number;
+  readonly openingCash: AmountBreakdown;
+  readonly closingCash: AmountBreakdown;
   readonly metadata: ReportMetadata;
 }
 
@@ -29,11 +39,13 @@ export const buildCashFlowStatement = (input: CashFlowInput): CashFlowStatement 
   const operating = section(operatingItems);
   const investing = section(input.investingFlows);
   const financing = section(input.financingFlows);
-  const netChange = operating.subtotal + investing.subtotal + financing.subtotal;
-  const expectedClosing = input.openingCash + netChange;
-  if (Math.abs(expectedClosing - input.closingCash) > EPSILON_KRW) {
+  const netChange = addBreakdown(addBreakdown(operating.subtotal, investing.subtotal), financing.subtotal);
+
+  // Certain-only reconciliation check.
+  const expectedClosingCertain = input.openingCash.certain + netChange.certain;
+  if (Math.abs(expectedClosingCertain - input.closingCash.certain) > EPSILON_KRW) {
     throw new Error(
-      `Cash flow reconciliation broken: opening(${input.openingCash}) + netChange(${netChange}) != closing(${input.closingCash})`,
+      `Cash flow reconciliation broken (certain only): opening(${input.openingCash.certain}) + netChange(${netChange.certain}) != closing(${input.closingCash.certain})`,
     );
   }
   return {
@@ -50,3 +62,5 @@ export const buildCashFlowStatement = (input: CashFlowInput): CashFlowStatement 
     metadata: input.metadata,
   };
 };
+
+export { zeroBreakdown, subtractBreakdown };

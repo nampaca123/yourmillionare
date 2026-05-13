@@ -1,21 +1,34 @@
-// P&L builder — collapses period-scoped journal aggregates into the K-IFRS income statement.
+// P&L builder — collapses period-scoped journal aggregates into K-IFRS income statement with certain/uncertain breakdown.
 
-import type { IncomeStatement, LineItem, ReportMetadata, SectionBlock } from '../types.js';
+import {
+  addBreakdown,
+  subtractBreakdown,
+  sumBreakdown,
+  zeroBreakdown,
+  type AmountBreakdown,
+  type IncomeStatement,
+  type LineItem,
+  type ReportMetadata,
+  type SectionBlock,
+} from '../types.js';
 
 export interface PnlInputRow {
   readonly accountCode: string;
   readonly accountName: string;
   readonly accountKind: 'revenue' | 'cogs' | 'operating_expense' | 'non_operating' | 'income_tax';
-  readonly amount: number;
+  readonly amount: AmountBreakdown;
 }
+
+const toLineItem = (row: PnlInputRow): LineItem => ({
+  accountCode: row.accountCode,
+  accountName: row.accountName,
+  amount: row.amount,
+});
 
 const buildSection = (items: ReadonlyArray<LineItem>): SectionBlock => ({
   items,
-  subtotal: items.reduce((sum, item) => sum + item.amount, 0),
+  subtotal: sumBreakdown(items.map((i) => i.amount)),
 });
-
-const toLineItems = (rows: ReadonlyArray<PnlInputRow>): ReadonlyArray<LineItem> =>
-  rows.map((row) => ({ accountCode: row.accountCode, accountName: row.accountName, amount: row.amount }));
 
 export interface PnlBuilderInput {
   readonly from: string;
@@ -25,18 +38,18 @@ export interface PnlBuilderInput {
 }
 
 export const buildIncomeStatement = (input: PnlBuilderInput): IncomeStatement => {
-  const revenue = buildSection(toLineItems(input.rows.filter((r) => r.accountKind === 'revenue')));
-  const cogs = buildSection(toLineItems(input.rows.filter((r) => r.accountKind === 'cogs')));
-  const operatingExpenses = buildSection(toLineItems(input.rows.filter((r) => r.accountKind === 'operating_expense')));
-  const nonOperating = buildSection(toLineItems(input.rows.filter((r) => r.accountKind === 'non_operating')));
+  const revenue = buildSection(input.rows.filter((r) => r.accountKind === 'revenue').map(toLineItem));
+  const cogs = buildSection(input.rows.filter((r) => r.accountKind === 'cogs').map(toLineItem));
+  const operatingExpenses = buildSection(input.rows.filter((r) => r.accountKind === 'operating_expense').map(toLineItem));
+  const nonOperating = buildSection(input.rows.filter((r) => r.accountKind === 'non_operating').map(toLineItem));
   const incomeTax = input.rows
     .filter((r) => r.accountKind === 'income_tax')
-    .reduce((sum, r) => sum + r.amount, 0);
+    .reduce<AmountBreakdown>((acc, r) => addBreakdown(acc, r.amount), zeroBreakdown());
 
-  const grossProfit = revenue.subtotal - cogs.subtotal;
-  const operatingIncome = grossProfit - operatingExpenses.subtotal;
-  const netIncomeBeforeTax = operatingIncome + nonOperating.subtotal;
-  const netIncome = netIncomeBeforeTax - incomeTax;
+  const grossProfit = subtractBreakdown(revenue.subtotal, cogs.subtotal);
+  const operatingIncome = subtractBreakdown(grossProfit, operatingExpenses.subtotal);
+  const netIncomeBeforeTax = addBreakdown(operatingIncome, nonOperating.subtotal);
+  const netIncome = subtractBreakdown(netIncomeBeforeTax, incomeTax);
 
   return {
     from: input.from,

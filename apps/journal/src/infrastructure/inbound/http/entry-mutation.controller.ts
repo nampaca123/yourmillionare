@@ -1,18 +1,15 @@
-// Controllers: GET /uncertain, POST /uncertain/{rawTransactionId}/confirm, POST /uncertain/{rawTransactionId}/discard.
+// Controllers for PATCH /entries/{id}, POST /entries/{id}/confirm, POST /entries/{id}/discard.
 
 import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { z, ZodError } from 'zod';
 import { ValidationError } from '@ym/shared-errors';
 import type { EnsureUserExistsUseCase } from '../../../application/ensure-user-exists.use-case.js';
-import type { ListUncertainUseCase } from '../../../application/list-uncertain.use-case.js';
-import type { ConfirmUncertainUseCase } from '../../../application/confirm-uncertain.use-case.js';
-import type { DiscardUncertainUseCase } from '../../../application/discard-uncertain.use-case.js';
+import type { UpdateEntryLinesUseCase } from '../../../application/update-entry-lines.use-case.js';
+import type { ConfirmEntryUseCase } from '../../../application/confirm-entry.use-case.js';
+import type { DiscardEntryUseCase } from '../../../application/discard-entry.use-case.js';
 import { parseClaims } from './auth-claims.mapper.js';
 
-const DEFAULT_LIMIT = 200;
-const MAX_LIMIT = 500;
-
-const CorrectedLineSchema = z.object({
+const LineSchema = z.object({
   lineNo: z.number().int().min(1),
   accountCode: z.string().min(1).max(10),
   debit: z.number().nonnegative(),
@@ -20,18 +17,11 @@ const CorrectedLineSchema = z.object({
   memo: z.string().nullable().optional(),
 });
 
-const ConfirmRequestSchema = z
+const PatchBodySchema = z
   .object({
-    correctedLines: z.array(CorrectedLineSchema).min(2).optional(),
+    lines: z.array(LineSchema).min(2),
   })
   .strict();
-
-const parseLimit = (raw: string | undefined): number => {
-  if (raw === undefined) return DEFAULT_LIMIT;
-  const n = Number.parseInt(raw, 10);
-  if (Number.isNaN(n) || n < 1) throw new ValidationError('limit must be a positive integer');
-  return Math.min(n, MAX_LIMIT);
-};
 
 const parseBody = (raw: string | undefined): unknown => {
   if (raw === undefined || raw.length === 0) return {};
@@ -42,61 +32,60 @@ const parseBody = (raw: string | undefined): unknown => {
   }
 };
 
-export const buildListUncertainController =
-  (ensureUser: EnsureUserExistsUseCase, useCase: ListUncertainUseCase) =>
+export const buildPatchEntryController =
+  (ensureUser: EnsureUserExistsUseCase, useCase: UpdateEntryLinesUseCase) =>
   async (event: APIGatewayProxyEventV2WithJWTAuthorizer): Promise<APIGatewayProxyResultV2> => {
     const claims = parseClaims(event.requestContext.authorizer.jwt.claims);
     const user = await ensureUser.execute({ cognitoSub: claims.cognitoSub, email: claims.email });
     const tenantId = event.pathParameters?.tenantId ?? '';
-    const limit = parseLimit(event.queryStringParameters?.limit);
+    const entryId = event.pathParameters?.entryId ?? '';
+    if (!entryId) throw new ValidationError('entryId is required');
 
-    const items = await useCase.execute({
+    const parsed = PatchBodySchema.safeParse(parseBody(event.body ?? undefined));
+    if (!parsed.success) throw new ZodError(parsed.error.issues);
+
+    const updated = await useCase.execute({
       tenantId,
       userId: user.id,
       cognitoSub: claims.cognitoSub,
-      limit,
+      entryId,
+      lines: parsed.data.lines,
     });
-    return { statusCode: 200, body: JSON.stringify({ items }) };
+    return { statusCode: 200, body: JSON.stringify(updated) };
   };
 
-export const buildConfirmUncertainController =
-  (ensureUser: EnsureUserExistsUseCase, useCase: ConfirmUncertainUseCase) =>
+export const buildConfirmEntryController =
+  (ensureUser: EnsureUserExistsUseCase, useCase: ConfirmEntryUseCase) =>
   async (event: APIGatewayProxyEventV2WithJWTAuthorizer): Promise<APIGatewayProxyResultV2> => {
     const claims = parseClaims(event.requestContext.authorizer.jwt.claims);
     const user = await ensureUser.execute({ cognitoSub: claims.cognitoSub, email: claims.email });
     const tenantId = event.pathParameters?.tenantId ?? '';
-    const rawTransactionId = event.pathParameters?.rawTransactionId ?? '';
-
-    if (!rawTransactionId) throw new ValidationError('rawTransactionId is required');
-
-    const parsed = ConfirmRequestSchema.safeParse(parseBody(event.body ?? undefined));
-    if (!parsed.success) throw new ZodError(parsed.error.issues);
+    const entryId = event.pathParameters?.entryId ?? '';
+    if (!entryId) throw new ValidationError('entryId is required');
 
     const result = await useCase.execute({
       tenantId,
       userId: user.id,
       cognitoSub: claims.cognitoSub,
-      rawTransactionId,
-      ...(parsed.data.correctedLines ? { correctedLines: parsed.data.correctedLines } : {}),
+      entryId,
     });
     return { statusCode: 200, body: JSON.stringify(result) };
   };
 
-export const buildDiscardUncertainController =
-  (ensureUser: EnsureUserExistsUseCase, useCase: DiscardUncertainUseCase) =>
+export const buildDiscardEntryController =
+  (ensureUser: EnsureUserExistsUseCase, useCase: DiscardEntryUseCase) =>
   async (event: APIGatewayProxyEventV2WithJWTAuthorizer): Promise<APIGatewayProxyResultV2> => {
     const claims = parseClaims(event.requestContext.authorizer.jwt.claims);
     const user = await ensureUser.execute({ cognitoSub: claims.cognitoSub, email: claims.email });
     const tenantId = event.pathParameters?.tenantId ?? '';
-    const rawTransactionId = event.pathParameters?.rawTransactionId ?? '';
-
-    if (!rawTransactionId) throw new ValidationError('rawTransactionId is required');
+    const entryId = event.pathParameters?.entryId ?? '';
+    if (!entryId) throw new ValidationError('entryId is required');
 
     const result = await useCase.execute({
       tenantId,
       userId: user.id,
       cognitoSub: claims.cognitoSub,
-      rawTransactionId,
+      entryId,
     });
     return { statusCode: 200, body: JSON.stringify(result) };
   };

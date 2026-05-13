@@ -126,17 +126,30 @@ const validateDateRange = (from: string | undefined, to: string | undefined): vo
   if (span > MAX_RANGE_DAYS) throw new ValidationError(`Date range must not exceed ${MAX_RANGE_DAYS} days`);
 };
 
-const verifyMembership = async (tenantId: string, cognitoSub: string): Promise<void> => {
-  const isMember = await withRlsContext({ cognitoSub: 'system', tenantId }, async (client) => {
-    const result = await client.query<{ exists: boolean }>(
-      `SELECT EXISTS (
-         SELECT 1 FROM tenant_members tm
-           JOIN users u ON u.id = tm.user_id
-          WHERE tm.tenant_id = $1 AND u.cognito_sub = $2
-       ) AS exists`,
-      [tenantId, cognitoSub],
+const resolveUserId = async (cognitoSub: string, email: string): Promise<string> => {
+  return withRlsContext({ cognitoSub }, async (client) => {
+    const existing = await client.query<{ id: string }>(
+      `SELECT id FROM users WHERE cognito_sub = $1`,
+      [cognitoSub],
     );
-    return result.rows[0]?.exists === true;
+    if (existing.rows[0]) return existing.rows[0].id;
+    const inserted = await client.query<{ id: string }>(
+      `INSERT INTO users (cognito_sub, email) VALUES ($1, $2) RETURNING id`,
+      [cognitoSub, email],
+    );
+    const id = inserted.rows[0]?.id;
+    if (!id) throw new AppError(500, 'INTERNAL_ERROR', 'Internal server error.', 'Failed to insert user');
+    return id;
+  });
+};
+
+const verifyMembership = async (tenantId: string, userId: string, cognitoSub: string): Promise<void> => {
+  const isMember = await withRlsContext({ userId, tenantId, cognitoSub }, async (client) => {
+    const result = await client.query(
+      `SELECT 1 FROM tenant_members WHERE tenant_id = $1 AND user_id = $2`,
+      [tenantId, userId],
+    );
+    return result.rows.length > 0;
   });
   if (!isMember) throw new ForbiddenError(`User ${cognitoSub} is not a member of tenant ${tenantId}`);
 };
@@ -367,50 +380,9 @@ const classifyRawTransaction = async (
   };
   const ruleId = `bedrock:${classifyResult.modelId}`;
 
-  if (classifyResult.confidence < DRAFT_CONFIDENCE_THRESHOLD) {
-    await withRlsContext({ cognitoSub: 'system', tenantId }, async (client) => {
-      await client.query(
-        `INSERT INTO journal_entry_draft
-           (raw_transaction_id, tenant_id, draft_lines, ai_confidence, rule_id, origin, status, sync_run_id)
-         VALUES ($1, $2, $3::jsonb, $4, $5, 'ai_low_conf', 'pending', $6)
-         ON CONFLICT (raw_transaction_id) DO UPDATE
-           SET draft_lines  = EXCLUDED.draft_lines,
-               ai_confidence = EXCLUDED.ai_confidence,
-               rule_id      = EXCLUDED.rule_id,
-               origin       = 'ai_low_conf',
-               status       = 'pending',
-               sync_run_id  = COALESCE(EXCLUDED.sync_run_id, journal_entry_draft.sync_run_id)`,
-        [
-          rawTransactionId,
-          tenantId,
-          JSON.stringify(classifyResult.lines),
-          classifyResult.confidence,
-          ruleId,
-          syncRunId,
-        ],
-      );
-      await markDispatched(client, [rawTransactionId]);
-    });
-    return {
-      rawTransactionId,
-      occurredAt: raw.occurred_at,
-      amount,
-      counterparty: raw.counterparty,
-      sourceAccount,
-      status: 'uncertain',
-      origin: 'ai_low_conf',
-      confidence: classifyResult.confidence,
-      ruleId,
-      lines: classifyResult.lines.map((l) => ({
-        lineNo: l.lineNo,
-        accountCode: l.accountCode,
-        debit: l.debit,
-        credit: l.credit,
-        memo: l.memo ?? null,
-      })),
-      journalEntryId: null,
-    };
-  }
+  const isUncertain = classifyResult.confidence < DRAFT_CONFIDENCE_THRESHOLD;
+  const confidenceStatus: 'certain' | 'uncertain' = isUncertain ? 'uncertain' : 'certain';
+  const origin: 'ai' | 'ai_low_conf' = isUncertain ? 'ai_low_conf' : 'ai';
 
   const entry = createJournalEntry({
     tenantId,
@@ -422,6 +394,11 @@ const classifyRawTransaction = async (
     aiConfidence: classifyResult.confidence,
     aiModel: classifyResult.modelId,
     description: counterparty,
+    confidenceStatus,
+    confidence: classifyResult.confidence,
+    origin,
+    syncRunId,
+    entryStatus: isUncertain ? 'draft' : 'posted',
   });
   const journalEntryId = randomUUID();
   const entryWithId = { ...entry, id: journalEntryId };
@@ -433,10 +410,6 @@ const classifyRawTransaction = async (
 
     const [persisted] = await journalRepo.saveEntriesAtomically(client, [entryWithId]);
     if (!persisted) return null;
-    await client.query(
-      `UPDATE journal_entries SET sync_run_id = $1 WHERE id = $2 AND tenant_id = $3`,
-      [syncRunId, persisted.id, tenantId],
-    );
     await client.query(
       `INSERT INTO ai_decisions (entry_id, tenant_id, model, input_tokens, output_tokens, confidence)
        VALUES ($1, $2, $3, $4, $5, $6)
@@ -454,7 +427,7 @@ const classifyRawTransaction = async (
     return persisted;
   });
 
-  if (saved) {
+  if (saved && !isUncertain) {
     try {
       await cacheProjector.projectEntry(tenantId, saved);
     } catch (cacheErr) {
@@ -468,8 +441,8 @@ const classifyRawTransaction = async (
     amount,
     counterparty: raw.counterparty,
     sourceAccount,
-    status: 'certain',
-    origin: classifyResult.confidence >= 0.5 ? 'ai' : 'ai_low_conf',
+    status: confidenceStatus,
+    origin,
     confidence: classifyResult.confidence,
     ruleId,
     lines: classifyResult.lines.map((l) => ({
@@ -549,7 +522,8 @@ const handlerImpl = async (event: FunctionUrlEvent, responseStream: ResponseStre
     }
     validateDateRange(parsed.data.from, parsed.data.to);
 
-    await verifyMembership(tenantId, claims.cognitoSub);
+    const userId = await resolveUserId(claims.cognitoSub, claims.email);
+    await verifyMembership(tenantId, userId, claims.cognitoSub);
 
     syncRunId = await withRlsContext({ cognitoSub: 'system', tenantId }, async (client) =>
       createSyncRun(client, {

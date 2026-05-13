@@ -100,35 +100,9 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
           memo: counterparty,
         });
 
-        if (classifyResult.confidence < DRAFT_CONFIDENCE_THRESHOLD) {
-          await client.query(
-            `INSERT INTO journal_entry_draft
-               (raw_transaction_id, tenant_id, draft_lines, ai_confidence, rule_id, origin, status, sync_run_id)
-             VALUES ($1, $2, $3::jsonb, $4, $5, 'ai_low_conf', 'pending', $6)
-             ON CONFLICT (raw_transaction_id) DO UPDATE
-               SET draft_lines  = EXCLUDED.draft_lines,
-                   ai_confidence = EXCLUDED.ai_confidence,
-                   rule_id      = EXCLUDED.rule_id,
-                   origin       = 'ai_low_conf',
-                   status       = 'pending',
-                   sync_run_id  = COALESCE(EXCLUDED.sync_run_id, journal_entry_draft.sync_run_id)`,
-            [
-              rawTransactionId,
-              tenantId,
-              JSON.stringify(classifyResult.lines),
-              classifyResult.confidence,
-              `bedrock:${classifyResult.modelId}`,
-              syncRunId,
-            ],
-          );
-          await markDispatched(client, [rawTransactionId]);
-          await client.query('COMMIT');
-          log.info(
-            { rawTransactionId, confidence: classifyResult.confidence, threshold: DRAFT_CONFIDENCE_THRESHOLD },
-            'Low-confidence classification routed to journal_entry_draft for user review',
-          );
-          continue;
-        }
+        const isUncertain = classifyResult.confidence < DRAFT_CONFIDENCE_THRESHOLD;
+        const confidenceStatus: 'certain' | 'uncertain' = isUncertain ? 'uncertain' : 'certain';
+        const origin: 'ai' | 'ai_low_conf' = isUncertain ? 'ai_low_conf' : 'ai';
 
         const entry = createJournalEntry({
           tenantId,
@@ -140,6 +114,11 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
           aiConfidence: classifyResult.confidence,
           aiModel: classifyResult.modelId,
           description: counterparty,
+          confidenceStatus,
+          confidence: classifyResult.confidence,
+          origin,
+          ...(syncRunId ? { syncRunId } : {}),
+          entryStatus: isUncertain ? 'draft' : 'posted',
         });
 
         const randomId = crypto.randomUUID();
@@ -161,22 +140,12 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
               classifyResult.confidence,
             ],
           );
-          if (syncRunId) {
-            await client.query(
-              `UPDATE journal_entries SET sync_run_id = $1 WHERE id = $2 AND tenant_id = $3`,
-              [syncRunId, saved.id, tenantId],
-            );
-          }
-          await client.query(
-            `DELETE FROM journal_entry_draft WHERE raw_transaction_id = $1 AND tenant_id = $2`,
-            [rawTransactionId, tenantId],
-          );
         }
 
         await markDispatched(client, [rawTransactionId]);
         await client.query('COMMIT');
 
-        if (saved) {
+        if (saved && !isUncertain) {
           try {
             await cacheProjector.projectEntry(tenantId, saved);
           } catch (cacheErr) {

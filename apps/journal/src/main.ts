@@ -11,10 +11,9 @@ import { PgUserRepository } from './infrastructure/outbound/pg/pg-user.repositor
 import { PgTenantMemberRepository } from './infrastructure/outbound/pg/pg-tenant-member.repository.js';
 import { PgAccountRepository } from './infrastructure/outbound/pg/pg-account.repository.js';
 import { PgJournalRepository } from './infrastructure/outbound/pg/pg-journal.repository.js';
-import { PgDraftRepository } from './infrastructure/outbound/pg/pg-draft.repository.js';
 import { PgViewsRepository } from './infrastructure/outbound/pg/pg-views.repository.js';
 import { PgReportsRepository } from './infrastructure/outbound/pg/pg-reports.repository.js';
-import { PgUncertainRepository } from './infrastructure/outbound/pg/pg-uncertain.repository.js';
+import { PgEntriesRepository } from './infrastructure/outbound/pg/pg-entries.repository.js';
 import { DdbCostCounterAdapter } from './infrastructure/outbound/ddb/ddb-cost-counter.adapter.js';
 import { BedrockConverseClassifier, DeterministicStubClassifier, DdbCacheProjectorAdapter } from '@ym/journal-core';
 import { EnsureUserExistsUseCase } from './application/ensure-user-exists.use-case.js';
@@ -26,9 +25,9 @@ import { ListJournalEntriesUseCase } from './application/list-journal-entries.us
 import { GetMonthlySummaryUseCase } from './application/get-monthly-summary.use-case.js';
 import { GetReceivablesUseCase, UpdateReceivableStatusUseCase } from './application/get-receivables.use-case.js';
 import { GetAccountBalancesUseCase } from './application/get-account-balances.use-case.js';
-import { ListUncertainUseCase } from './application/list-uncertain.use-case.js';
-import { ConfirmUncertainUseCase } from './application/confirm-uncertain.use-case.js';
-import { DiscardUncertainUseCase } from './application/discard-uncertain.use-case.js';
+import { UpdateEntryLinesUseCase } from './application/update-entry-lines.use-case.js';
+import { ConfirmEntryUseCase } from './application/confirm-entry.use-case.js';
+import { DiscardEntryUseCase } from './application/discard-entry.use-case.js';
 import {
   BuildBalanceSheetUseCase,
   BuildCashFlowUseCase,
@@ -52,10 +51,10 @@ import {
 } from './infrastructure/inbound/http/reports.controller.js';
 import { accountsChartController } from './infrastructure/inbound/http/accounts-chart.controller.js';
 import {
-  buildConfirmUncertainController,
-  buildDiscardUncertainController,
-  buildListUncertainController,
-} from './infrastructure/inbound/http/uncertain.controller.js';
+  buildConfirmEntryController,
+  buildDiscardEntryController,
+  buildPatchEntryController,
+} from './infrastructure/inbound/http/entry-mutation.controller.js';
 import { buildPersistenceStore, buildIdempotencyConfig } from './infrastructure/inbound/http/idempotency.config.js';
 
 export type Handler = (event: APIGatewayProxyEventV2WithJWTAuthorizer) => Promise<APIGatewayProxyResultV2> | APIGatewayProxyResultV2;
@@ -66,10 +65,9 @@ const userRepo = new PgUserRepository();
 const memberRepo = new PgTenantMemberRepository();
 const accountRepo = new PgAccountRepository();
 const journalRepo = new PgJournalRepository();
-const draftRepo = new PgDraftRepository();
 const viewsRepo = new PgViewsRepository();
 const reportsRepo = new PgReportsRepository();
-const uncertainRepo = new PgUncertainRepository();
+const entriesRepo = new PgEntriesRepository();
 const costCounter = new DdbCostCounterAdapter();
 const useStubClassifier =
   process.env.JOURNAL_STUB_CLASSIFIER === '1' || process.env.JOURNAL_STUB_CLASSIFIER === 'true';
@@ -82,14 +80,14 @@ const verifyMembership = new VerifyTenantMembershipUseCase(memberRepo);
 const ensureSeeded = new EnsureAccountsSeededUseCase(accountRepo);
 const classifyTransaction = new ClassifyTransactionUseCase(classifier, journalRepo, costCounter, DAILY_LIMIT);
 const createEntry = new CreateJournalEntryUseCase(journalRepo, accountRepo, cacheProjector);
-const listEntries = new ListJournalEntriesUseCase(verifyMembership, journalRepo);
+const listEntries = new ListJournalEntriesUseCase(verifyMembership, entriesRepo);
 const getMonthlySummary = new GetMonthlySummaryUseCase(verifyMembership, viewsRepo);
 const getReceivables = new GetReceivablesUseCase(verifyMembership, viewsRepo);
 const updateReceivable = new UpdateReceivableStatusUseCase(verifyMembership, viewsRepo);
 const getAccountBalances = new GetAccountBalancesUseCase(verifyMembership, viewsRepo);
-const listUncertain = new ListUncertainUseCase(verifyMembership, uncertainRepo);
-const confirmUncertain = new ConfirmUncertainUseCase(verifyMembership, draftRepo, journalRepo);
-const discardUncertain = new DiscardUncertainUseCase(verifyMembership, draftRepo);
+const updateEntryLines = new UpdateEntryLinesUseCase(verifyMembership, entriesRepo);
+const confirmEntry = new ConfirmEntryUseCase(verifyMembership, entriesRepo);
+const discardEntry = new DiscardEntryUseCase(verifyMembership, entriesRepo);
 const buildPnl = new BuildIncomeStatementUseCase(verifyMembership, reportsRepo);
 const buildBs = new BuildBalanceSheetUseCase(verifyMembership, reportsRepo);
 const buildTb = new BuildTrialBalanceUseCase(verifyMembership, reportsRepo);
@@ -102,9 +100,9 @@ const monthlySummaryController = buildMonthlySummaryController(ensureUser, getMo
 const receivablesController = buildReceivablesController(ensureUser, getReceivables);
 const updateReceivableController = buildUpdateReceivableController(ensureUser, updateReceivable);
 const balancesController = buildAccountBalancesController(ensureUser, getAccountBalances);
-const listUncertainController = buildListUncertainController(ensureUser, listUncertain);
-const confirmUncertainController = buildConfirmUncertainController(ensureUser, confirmUncertain);
-const discardUncertainController = buildDiscardUncertainController(ensureUser, discardUncertain);
+const patchEntryController = buildPatchEntryController(ensureUser, updateEntryLines);
+const confirmEntryController = buildConfirmEntryController(ensureUser, confirmEntry);
+const discardEntryController = buildDiscardEntryController(ensureUser, discardEntry);
 const pnlController = buildPnlController(ensureUser, buildPnl);
 const balanceSheetController = buildBalanceSheetController(ensureUser, buildBs);
 const trialBalanceController = buildTrialBalanceController(ensureUser, buildTb);
@@ -139,10 +137,10 @@ export const container = {
     'GET /accounts/chart': accountsChartController as Handler,
     'POST /tenants/{tenantId}/journal/classify': classifyWithIdempotencyMapped,
     'POST /tenants/{tenantId}/journal/entries': createEntryController,
-    'GET /tenants/{tenantId}/journal/entries': listEntriesController,
-    'GET /tenants/{tenantId}/uncertain': listUncertainController,
-    'POST /tenants/{tenantId}/uncertain/{rawTransactionId}/confirm': confirmUncertainController,
-    'POST /tenants/{tenantId}/uncertain/{rawTransactionId}/discard': discardUncertainController,
+    'GET /tenants/{tenantId}/entries': listEntriesController,
+    'PATCH /tenants/{tenantId}/entries/{entryId}': patchEntryController,
+    'POST /tenants/{tenantId}/entries/{entryId}/confirm': confirmEntryController,
+    'POST /tenants/{tenantId}/entries/{entryId}/discard': discardEntryController,
     'GET /tenants/{tenantId}/summary/monthly': monthlySummaryController,
     'GET /tenants/{tenantId}/receivables': receivablesController,
     'PATCH /tenants/{tenantId}/receivables/{entryId}': updateReceivableController,

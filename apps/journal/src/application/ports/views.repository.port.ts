@@ -1,11 +1,13 @@
-// Port: aggregated read models for the 4 core views (Monthly Summary, Receivables Kanban, Account Balances, Drafts).
+// Port: aggregated read models for monthly summary, receivables, and account balances. All amounts carry breakdown.
+
+import type { AmountBreakdown } from '@ym/reports-core';
 
 export interface MonthlySummary {
   readonly ym: string;
-  readonly income: number;
-  readonly expense: number;
-  readonly netCashBalance: number;
-  readonly forecastNextMonth: number;
+  readonly income: AmountBreakdown;
+  readonly expense: AmountBreakdown;
+  readonly netCashBalance: AmountBreakdown;
+  readonly forecastNextMonth: AmountBreakdown;
   readonly currency: 'KRW';
 }
 
@@ -18,6 +20,7 @@ export interface ReceivableCard {
   readonly amount: number;
   readonly dueDate: string | null;
   readonly daysOverdue: number;
+  readonly confidenceStatus: 'certain' | 'uncertain';
 }
 
 export interface ReceivablesBoard {
@@ -32,7 +35,7 @@ export interface AccountBalanceCard {
   readonly accountName: string;
   readonly displayName: string;
   readonly type: 'asset' | 'liability' | 'equity' | 'revenue' | 'expense';
-  readonly balance: number;
+  readonly balance: AmountBreakdown;
   readonly currency: string;
 }
 
