@@ -7,6 +7,7 @@ import type {
   RawForeignTransaction,
 } from './codef.types.js';
 import { getAccessToken } from './codef-auth.client.js';
+import { pickCounterparty } from './codef-counterparty.mapper.js';
 import { CODEF_SUCCESS_CODE } from '../../../domain/codef-error-codes.js';
 
 const CODEF_API_BASE = 'https://development.codef.io';
@@ -44,7 +45,7 @@ const buildForeignTransaction = (row: CodefTxRow): RawForeignTransaction => {
   const fcyAmount = inAmount > 0 ? inAmount : -outAmount;
 
   const externalId = `${date}|${time ?? '000000'}|${out}|${inAmt}|${balance}`;
-  const counterparty = row.resAccountDesc1 || row.resAccountDesc2 || undefined;
+  const counterparty = pickCounterparty(row);
 
   return {
     externalId,

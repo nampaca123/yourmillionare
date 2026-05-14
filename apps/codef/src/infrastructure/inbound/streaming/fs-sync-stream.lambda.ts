@@ -22,6 +22,8 @@ import {
 import { AppError, ForbiddenError, ValidationError, toHttpErrorResponse } from '@ym/shared-errors';
 import { withRlsContext } from '../../outbound/pg/pg-rls.context.js';
 import { fetchTransactions } from '../../outbound/codef/codef-bank.client.js';
+import { buildClassifierMemo, pickCounterparty } from '../../outbound/codef/codef-counterparty.mapper.js';
+import type { CodefTxRow } from '../../outbound/codef/codef.types.js';
 import { upsertBatch, markDispatched } from '../../outbound/pg/pg-raw-transaction.repository.js';
 import {
   completeSyncRun,
@@ -80,6 +82,7 @@ interface RawTxRow {
   occurred_at: Date;
   amount: string;
   counterparty: string | null;
+  raw_payload: CodefTxRow;
   bank_account_id: string | null;
   source_organization: string | null;
   source_account_number: string | null;
@@ -365,7 +368,7 @@ const fetchRawTransaction = async (
 ): Promise<RawTxRow | undefined> =>
   withRlsContext({ cognitoSub: 'system', tenantId }, async (client) => {
     const result = await client.query<RawTxRow>(
-      `SELECT rt.id, rt.occurred_at, rt.amount::text, rt.counterparty, rt.bank_account_id,
+      `SELECT rt.id, rt.occurred_at, rt.amount::text, rt.counterparty, rt.raw_payload, rt.bank_account_id,
               tba.organization   AS source_organization,
               tba.account_number AS source_account_number
          FROM raw_transactions rt
@@ -409,13 +412,14 @@ const classifyRawTransaction = async (
   if (!raw) return null;
 
   const entryDate = raw.occurred_at.toISOString().slice(0, 10);
-  const counterparty = raw.counterparty ?? 'Unknown';
+  const counterparty = pickCounterparty(raw.raw_payload) ?? raw.counterparty ?? 'Unknown';
   const amount = Math.abs(Number.parseFloat(raw.amount));
+  const memo = buildClassifierMemo(raw.raw_payload) || counterparty;
   const classifyResult = await classifier.classify({
     date: entryDate,
     amount,
     counterparty,
-    memo: counterparty,
+    memo,
   });
 
   const sourceAccount = {

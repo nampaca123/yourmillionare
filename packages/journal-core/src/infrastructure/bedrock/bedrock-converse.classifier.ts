@@ -12,6 +12,7 @@ import { BedrockUnavailableError, RateLimitError } from '@ym/shared-errors';
 import { z } from 'zod';
 import type { TransactionClassifier, ClassifyInput, ClassifyResult } from '../../application/ports/transaction-classifier.port.js';
 import { createJournalLine } from '../../domain/journal-line.value-object.js';
+import { K_IFRS_DEFAULT_ACCOUNTS } from '../../domain/seed-accounts.js';
 
 const MODEL_ID = process.env.BEDROCK_MODEL_ID ?? 'global.anthropic.claude-sonnet-4-6';
 const REQUEST_TIMEOUT_MS = 20_000;
@@ -34,7 +35,39 @@ const ClassifyOutputSchema = z.object({
   confidence: z.number().min(0).max(1),
 });
 
-const SYSTEM_PROMPT = `You are a Korean K-IFRS accounting expert. Classify the given transaction into double-entry journal lines. Use standard Korean account codes (e.g. 1002 for 보통예금, 5301 for 임차료, 5401 for 통신비). The sum of all debit amounts must equal the sum of all credit amounts.`;
+const TYPE_LABELS: Record<(typeof K_IFRS_DEFAULT_ACCOUNTS)[number]['type'], string> = {
+  asset: 'Assets',
+  liability: 'Liabilities',
+  equity: 'Equity',
+  revenue: 'Revenue',
+  expense: 'Expenses',
+};
+
+const buildAccountCatalog = (): string => {
+  const groups = new Map<(typeof K_IFRS_DEFAULT_ACCOUNTS)[number]['type'], string[]>();
+  for (const a of K_IFRS_DEFAULT_ACCOUNTS) {
+    const line = `  - ${a.code} ${a.name} (normalBalance=${a.normalBalance})`;
+    const bucket = groups.get(a.type) ?? [];
+    bucket.push(line);
+    groups.set(a.type, bucket);
+  }
+  return (Object.keys(TYPE_LABELS) as Array<keyof typeof TYPE_LABELS>)
+    .map((type) => `${TYPE_LABELS[type]}:\n${(groups.get(type) ?? []).join('\n')}`)
+    .join('\n\n');
+};
+
+const SYSTEM_PROMPT = `You are a Korean K-IFRS accounting expert. Classify the given transaction into double-entry journal lines.
+
+Pick account codes ONLY from this chart of accounts. Do not invent codes:
+
+${buildAccountCatalog()}
+
+Rules:
+- Choose the most specific account that fits the counterparty and memo. Korean merchant names hint at the category (e.g. coffee shops/restaurants → 복리후생비 or 회의비, convenience stores → 소모품비 or 복리후생비, bookstores → 도서인쇄비 if present otherwise 소모품비, telecom carriers like KT/SKT/LG U+ → 통신비, rent → 임차료).
+- Outflows from a bank account use 1002 보통예금 on the credit side; inflows use it on the debit side.
+- The sum of all debit amounts must equal the sum of all credit amounts.
+- Return at least 2 lines (one debit, one credit).
+- Set confidence below 0.5 when the merchant name is generic, missing, or ambiguous so a human can review.`;
 
 export class BedrockConverseClassifier implements TransactionClassifier {
   async classify(input: ClassifyInput): Promise<ClassifyResult> {
