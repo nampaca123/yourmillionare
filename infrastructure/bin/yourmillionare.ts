@@ -1,5 +1,9 @@
 // CDK app entry: loads validated env, instantiates env-prefixed stacks, attaches cdk-nag and tags.
 
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { App, Aspects, Tags } from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
 
@@ -10,6 +14,33 @@ import { DataStack } from '../lib/stacks/data.stack.js';
 import { IdentityStack } from '../lib/stacks/identity.stack.js';
 import { ApiStack } from '../lib/stacks/api.stack.js';
 import { IngestionStack } from '../lib/stacks/ingestion.stack.js';
+
+// Load project-root .env into process.env before any config function reads it. Shell env
+// wins on conflict, so CI / operators that already export values stay authoritative. Without
+// this, a fresh shell running `cdk deploy` hits the dev fallback in cors.config.ts and
+// silently drops production origins (e.g. dashboard.yourmillionaire.kro.kr) from the
+// deployed HTTP API + Function URL CORS, manifesting as browser CORS errors only on the
+// deployed frontend while localhost continues to work.
+const loadDotenvIntoProcessEnv = (): void => {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const envPath = join(here, '../../.env');
+    const raw = readFileSync(envPath, 'utf8');
+    for (const line of raw.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eq = trimmed.indexOf('=');
+      if (eq < 1) continue;
+      const key = trimmed.slice(0, eq).trim();
+      if (process.env[key] !== undefined) continue;
+      process.env[key] = trimmed.slice(eq + 1);
+    }
+  } catch {
+    // .env absent (CI synth, fresh checkout) — downstream config validation still catches
+    // genuinely missing required values; optional ones fall through to their defaults.
+  }
+};
+loadDotenvIntoProcessEnv();
 
 const config = loadEnvConfig();
 const env = { account: config.account, region: config.region };
