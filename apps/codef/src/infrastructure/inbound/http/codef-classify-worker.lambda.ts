@@ -12,6 +12,8 @@ import {
 import type { TransactionClassifier } from '@ym/journal-core';
 import { getPool } from '../../outbound/pg/pg-pool.client.js';
 import { findById, markDispatched } from '../../outbound/pg/pg-raw-transaction.repository.js';
+import { buildClassifierMemo, pickCounterparty } from '../../outbound/codef/codef-counterparty.mapper.js';
+import type { CodefTxRow } from '../../outbound/codef/codef.types.js';
 import { logger } from '../../../shared/logging/logger.js';
 
 const CLASSIFY_MODE = process.env.CLASSIFY_MODE ?? 'bedrock';
@@ -87,14 +89,16 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
         }
 
         const entryDate = raw.occurred_at.toISOString().slice(0, 10);
-        const counterparty = raw.counterparty ?? 'Unknown';
+        const rawPayload = raw.raw_payload as CodefTxRow;
+        const counterparty = pickCounterparty(rawPayload) ?? raw.counterparty ?? 'Unknown';
         const amount = Math.abs(Number(raw.amount));
+        const memo = buildClassifierMemo(rawPayload) || counterparty;
 
         const classifyResult = await classifier.classify({
           date: entryDate,
           amount,
           counterparty,
-          memo: counterparty,
+          memo,
         });
 
         const isUncertain = classifyResult.confidence < DRAFT_CONFIDENCE_THRESHOLD;
