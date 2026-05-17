@@ -26,7 +26,7 @@ Foundation ──┬── Network ──┬── Data ──┬── Ingestio
 |---|---|---|
 | `Ym-Dev-Foundation` | Shared KMS CMK, CODEF/ECOS Secret slot | `sharedKey`, `codefCredentialSecret`, `ecosCredentialSecret` |
 | `Ym-Dev-Network` | VPC (`10.20.0.0/16`, 3 AZ), fck-nat, 4 VPC endpoints, Flow Logs | `vpc`, `lambdaSg`, `auroraSg` |
-| `Ym-Dev-Data` | Aurora Serverless v2 + 4 DynamoDB 테이블 + 스키마 마이그레이터 | `aurora.cluster`, `cache.*` |
+| `Ym-Dev-Data` | Aurora Serverless v2 + 4 DynamoDB 테이블 + 스키마 마이그레이터 | `aurora.cluster`, `cache.*`, `bedrockKbDbSecret` |
 | `Ym-Dev-Identity` | Cognito User Pool + Google IdP + Hosted UI | `userPool`, `userPoolClient`, `issuerUrl` |
 | `Ym-Dev-Ingestion` | EventBridge + Step Functions + SQS + 7 Lambda + Bedrock KB | `legalKbId`, `filingGeneratorFn`, `legalSyncStateMachineArn` |
 | `Ym-Dev-Api` | HTTP API + JWT Authorizer + 5 service Lambda + 3 SSE Function URL | (terminal) |
@@ -69,7 +69,7 @@ VPC 10.20.0.0/16  (3 AZ — a/b/c)
 | 속성 | dev | prod |
 |---|---|---|
 | Engine | Aurora PostgreSQL 15.10 | 동일 |
-| Capacity (ACU) | 0.5 ~ **2** | 0.5 ~ **4** |
+| Capacity (ACU) | 0.5 ~ **4** | 0.5 ~ **8** |
 | Writer | 1 (Serverless v2) | 1 (Serverless v2) — reader 없음 |
 | 서브넷 | `PRIVATE_ISOLATED` | 동일 |
 | 인증 | IAM auth + Data API + master secret | 동일 |
@@ -331,7 +331,7 @@ Function URL (regional, no API GW)
 
 PR-A (2026-05-13) 부터 Aurora writer 앞에 RDS Proxy 가 위치한다.
 
-- **이유**: ACU 비례 `max_connections` (dev 2 ACU ≈ ~430, prod 4 ACU ≈ ~870) 가 동시 Lambda 1000 인스턴스 burst 에 부족해질 수 있음. Proxy 가 client-side 와 backend 를 multiplex 해 connection storm 차단.
+- **이유**: ACU 비례 `max_connections` (dev 4 ACU ≈ ~860, prod 8 ACU ≈ ~1740) 가 동시 Lambda 1000 인스턴스 burst 에 부족해질 수 있음. Proxy 가 client-side 와 backend 를 multiplex 해 connection storm 차단.
 - **RLS 호환성**: `set_config(..., is_local=true)` 가 이미 transaction-scoped 라 Proxy pinning 트리거가 아님. `RESET app.*` 는 PR-A 에서 제거 (session-level statement, pinning 트리거).
 - **연결 경로**: Lambda → IAM token → Proxy endpoint → master secret → Aurora writer.
 - **운영 측정**: §7 의 RDS Proxy metrics 행. `ConnectionBorrowLatency p99 > 50ms`, `DatabaseConnections > 80%`, `ClientConnectionsBorrowing` spike 알람.
@@ -447,7 +447,7 @@ PR-A 시도 중 발견: **AWS WAF v2 는 API Gateway HTTP API v2 와 association
 |---|---|
 | 계정 | 단일 (`823401933116`) |
 | 스택 prefix | `Ym-Dev-*` / `Ym-Prod-*` |
-| Aurora capacity | dev 0.5-2 ACU / prod 0.5-4 ACU |
+| Aurora capacity | dev 0.5-4 ACU / prod 0.5-8 ACU |
 | NAT instance | dev 1 (SPOF) / prod 3 (per AZ) |
 | Cognito | dev MFA OFF / prod MFA OPTIONAL + AdvancedSecurity ENFORCED |
 | Lambda log level | dev `debug` / prod `info` |

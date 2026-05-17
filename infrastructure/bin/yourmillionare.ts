@@ -151,7 +151,6 @@ api.addDependency(data);
 api.addDependency(identity);
 api.addDependency(foundation);
 api.addDependency(ingestion);
-api.addDependency(ingestion);
 
 Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));
 
