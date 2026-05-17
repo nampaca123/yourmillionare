@@ -12,7 +12,8 @@ import { SnsAction } from 'aws-cdk-lib/aws-cloudwatch-actions';
 import type { ISecurityGroup, IVpc } from 'aws-cdk-lib/aws-ec2';
 import { SubnetType } from 'aws-cdk-lib/aws-ec2';
 import type { IKey } from 'aws-cdk-lib/aws-kms';
-import { HostedRotation } from 'aws-cdk-lib/aws-secretsmanager';
+import { HostedRotation, Secret } from 'aws-cdk-lib/aws-secretsmanager';
+import type { ISecret } from 'aws-cdk-lib/aws-secretsmanager';
 import { Runtime } from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
@@ -59,6 +60,7 @@ function migrationsSha256(): string {
 export class DataStack extends Stack {
   public readonly aurora: AuroraConstruct;
   public readonly cache: CacheConstruct;
+  public readonly bedrockKbDbSecret: ISecret;
 
   constructor(scope: Construct, id: string, props: DataStackProps) {
     super(scope, id, props);
@@ -167,6 +169,62 @@ export class DataStack extends Stack {
     const writerInstance = aurora.cluster.node.findChild('writer');
     migrationCR.node.addDependency(writerInstance);
 
+    // --- Bedrock KB scoped DB secret + password binder ---
+    const KB_SECRET_PASSWORD_LENGTH = 32;
+
+    const kbDbSecret = new Secret(this, 'BedrockKbDbSecret', {
+      secretName: `${this.stackName}-bedrock-kb-db-credentials`,
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({
+          username: 'bedrock_kb_user',
+          dbname: 'yourmillionare',
+          host: aurora.cluster.clusterEndpoint.hostname,
+          port: 5432,
+          engine: 'postgres',
+          dbClusterIdentifier: aurora.cluster.clusterIdentifier,
+        }),
+        generateStringKey: 'password',
+        passwordLength: KB_SECRET_PASSWORD_LENGTH,
+        excludePunctuation: true,
+      },
+    });
+    this.bedrockKbDbSecret = kbDbSecret;
+
+    const kbPasswordBinderFn = new NodejsFunction(this, 'KbPasswordBinderFn', {
+      entry: LAMBDA_ENTRY('kb-password-binder.lambda.ts'),
+      runtime: Runtime.NODEJS_20_X,
+      handler: 'handler',
+      timeout: Duration.minutes(2),
+      memorySize: 256,
+      reservedConcurrentExecutions: 1,
+      environment: {
+        CLUSTER_ARN: aurora.cluster.clusterArn,
+        MASTER_SECRET_ARN: aurora.masterSecret.secretArn,
+        KB_SECRET_ARN: kbDbSecret.secretArn,
+        DATABASE_NAME: 'yourmillionare',
+      },
+      bundling: { externalModules: ['@aws-sdk/*'] },
+    });
+
+    aurora.cluster.grantDataApiAccess(kbPasswordBinderFn);
+    aurora.masterSecret.grantRead(kbPasswordBinderFn);
+    kbDbSecret.grantRead(kbPasswordBinderFn);
+    kbPasswordBinderFn.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['kms:Decrypt', 'kms:GenerateDataKey'],
+        resources: [props.sharedKey.keyArn],
+      }),
+    );
+
+    const kbPasswordBinderProvider = new Provider(this, 'KbPasswordBinderProvider', {
+      onEventHandler: kbPasswordBinderFn,
+    });
+    const kbPasswordBinderCR = new CustomResource(this, 'KbPasswordBinder', {
+      serviceToken: kbPasswordBinderProvider.serviceToken,
+      properties: { secretArn: kbDbSecret.secretArn },
+    });
+    kbPasswordBinderCR.node.addDependency(migrationCR);
+
     // --- Verifier: schema check (no VPC, Data API) ---
     const verifierSchemaFn = new NodejsFunction(this, 'VerifierSchemaFn', {
       entry: LAMBDA_ENTRY('verifier-schema.lambda.ts'),
@@ -244,7 +302,7 @@ export class DataStack extends Stack {
     // --- cdk-nag suppressions ---
 
     // Custom Lambda functions
-    for (const fn of [migratorFn, verifierSchemaFn]) {
+    for (const fn of [migratorFn, verifierSchemaFn, kbPasswordBinderFn]) {
       NagSuppressions.addResourceSuppressions(
         fn,
         [
@@ -291,7 +349,7 @@ export class DataStack extends Stack {
     );
 
     // CDK-generated Provider framework Lambdas
-    for (const provider of [migratorProvider, verifierSchemaProvider, verifierIamProvider]) {
+    for (const provider of [migratorProvider, verifierSchemaProvider, verifierIamProvider, kbPasswordBinderProvider]) {
       NagSuppressions.addResourceSuppressions(
         provider,
         [
@@ -321,6 +379,7 @@ export class DataStack extends Stack {
       `/${this.stackName}/SchemaMigratorProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource`,
       `/${this.stackName}/VerifierSchemaProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource`,
       `/${this.stackName}/VerifierIamProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource`,
+      `/${this.stackName}/KbPasswordBinderProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource`,
     ];
     for (const path of frameworkIam5Paths) {
       NagSuppressions.addResourceSuppressionsByPath(this, path, [
@@ -447,6 +506,7 @@ export class DataStack extends Stack {
     new CfnOutput(this, 'AuroraClusterArn', { value: aurora.cluster.clusterArn, exportName: `${id}-AuroraClusterArn` });
     new CfnOutput(this, 'AuroraEndpoint', { value: aurora.cluster.clusterEndpoint.hostname, exportName: `${id}-AuroraEndpoint` });
     new CfnOutput(this, 'AuroraSecretArn', { value: aurora.masterSecret.secretArn, exportName: `${id}-AuroraSecretArn` });
+    new CfnOutput(this, 'BedrockKbDbSecretArn', { value: kbDbSecret.secretArn, exportName: `${id}-BedrockKbDbSecretArn` });
     new CfnOutput(this, 'MonthlySummaryCacheArn', { value: this.cache.monthlySummaryCache.tableArn });
     new CfnOutput(this, 'TransactionCacheArn', { value: this.cache.transactionCache.tableArn });
     new CfnOutput(this, 'IdempotencyKeysArn', { value: this.cache.idempotencyKeys.tableArn });
