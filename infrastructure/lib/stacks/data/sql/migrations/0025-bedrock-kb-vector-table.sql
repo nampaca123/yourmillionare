@@ -1,9 +1,9 @@
--- Migration 0025: Bedrock KB vector table for RDS storage configuration. Schema follows AWS-required field mapping (id, embedding, chunks, metadata) plus a custom_metadata column for data-source side metadata.
+-- Migration 0025: create bedrock_integration schema and bedrock_kb_legal vector table for Bedrock KB RDS storage.
 
 CREATE SCHEMA IF NOT EXISTS bedrock_integration;
 
 CREATE TABLE IF NOT EXISTS bedrock_integration.bedrock_kb_legal (
-  id              UUID         PRIMARY KEY,
+  id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
   embedding       vector(1024) NOT NULL,
   chunks          TEXT         NOT NULL,
   metadata        JSONB        NOT NULL,
