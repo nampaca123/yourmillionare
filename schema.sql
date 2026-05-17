@@ -17,7 +17,7 @@
 --
 --  스키마 변경 이력
 --    본 파일은 신규 클러스터에 적용되는 전체 DDL + RLS 단일 진실 원천으로 유지된다.
---    아래 migrations 0006–0024의 누적 결과가 본 파일에 반영된다 (idempotent: ALTER TABLE IF NOT EXISTS).
+--    아래 migrations 0006–0026의 누적 결과가 본 파일에 반영된다 (idempotent: ALTER TABLE IF NOT EXISTS).
 --      0006 ai_decisions
 --      0007 system user SELECT 정책
 --      0008 raw_transactions.dispatched_at
@@ -28,6 +28,8 @@
 --      0022 sync_run date range / bank_account_id / balance snapshot + raw_transactions first_sync_run_id/bank_account_id
 --      0023 journal_entry_draft DROP — 모든 분개는 journal_entries 안에서 confidence_status로 분류 (certain | uncertain | discarded)
 --      0024 tenant_bank_accounts multi-currency (manual FX 등록 + CODEF foreign 분기)
+--      0025 bedrock_integration schema + bedrock_kb_legal table + HNSW/bigm indexes (Aurora pgvector KB 백엔드 전환)
+--      0026 bedrock_kb_user role (Bedrock KB 전용 스코프 역할, 비밀번호는 KbPasswordBinder Custom Resource가 설정)
 --    이전에 존재했던 journal_entry_draft 테이블은 0023 마이그레이션이 데이터를 journal_entries로 이주 후 DROP했다.
 --    운영 DB와의 검증 예: RDS Data API / verifier-schema Lambda (`EXPECTED_POLICIES`).
 --    활성 정책 이름은 `verifier-schema.lambda.ts` 의 EXPECTED_POLICIES 과 일치해야 한다.
@@ -629,3 +631,29 @@ CREATE POLICY profile_self_only ON user_profiles
 INSERT INTO users (id, cognito_sub, email)
 VALUES ('00000000-0000-0000-0000-000000000001'::uuid, 'system', 'system@ym.internal')
 ON CONFLICT (cognito_sub) DO NOTHING;
+
+-- Bedrock KB integration (migrations 0025, 0026)
+CREATE SCHEMA IF NOT EXISTS bedrock_integration;
+
+CREATE TABLE IF NOT EXISTS bedrock_integration.bedrock_kb_legal (
+  id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  embedding       vector(1024) NOT NULL,
+  chunks          TEXT         NOT NULL,
+  metadata        JSONB        NOT NULL,
+  custom_metadata JSONB
+);
+
+CREATE INDEX IF NOT EXISTS bedrock_kb_legal_embedding_hnsw_idx
+  ON bedrock_integration.bedrock_kb_legal
+  USING hnsw (embedding vector_cosine_ops);
+
+CREATE INDEX IF NOT EXISTS bedrock_kb_legal_chunks_bigm_idx
+  ON bedrock_integration.bedrock_kb_legal
+  USING gin (chunks gin_bigm_ops);
+
+-- bedrock_kb_user role: created by migration 0026, password set by CDK Custom Resource (KbPasswordBinder).
+-- DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'bedrock_kb_user') THEN CREATE ROLE bedrock_kb_user LOGIN; END IF; END $$;
+-- GRANT CONNECT ON DATABASE yourmillionare TO bedrock_kb_user;
+-- GRANT USAGE ON SCHEMA bedrock_integration TO bedrock_kb_user;
+-- GRANT SELECT, INSERT, UPDATE, DELETE ON bedrock_integration.bedrock_kb_legal TO bedrock_kb_user;
+-- ALTER DEFAULT PRIVILEGES IN SCHEMA bedrock_integration GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO bedrock_kb_user;

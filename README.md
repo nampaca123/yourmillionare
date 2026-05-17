@@ -25,7 +25,7 @@ yourmillionare/
 ├── docs/                     # ARCHITECTURE.md, API_LIST.md, agent-architecture.md, slice reports
 ├── scripts/                  # sync-secrets, run-api-e2e, run-codef-e2e, run-agents-e2e, post-deploy-smoke
 ├── infrastructure/assets/rds/ap-northeast-2-bundle.pem  # RDS regional CA bundle for TLS pinning (PR-B1)
-├── schema.sql                # Aurora PostgreSQL DDL — single source of truth (migrations 0001–0024)
+├── schema.sql                # Aurora PostgreSQL DDL — single source of truth (migrations 0001–0026)
 └── CLAUDE.md                 # Engineering guidelines
 ```
 
@@ -37,7 +37,7 @@ All 6 stacks deployed to `ap-northeast-2` (account 823401933116). Bedrock Sonnet
 |-------|--------|-------|
 | `Ym-Dev-Foundation` | ✅ DEPLOYED | KMS CMK + CODEF/ECOS credential secret slots |
 | `Ym-Dev-Network` | ✅ DEPLOYED | VPC, fck-nat, VPC endpoints, Flow Logs |
-| `Ym-Dev-Data` | ✅ DEPLOYED | Aurora Serverless v2 PG 15.10, DynamoDB tables, migrations 0001–0024 |
+| `Ym-Dev-Data` | ✅ DEPLOYED | Aurora Serverless v2 PG 15.15, DynamoDB tables, migrations 0001–0026, pgvector 0.8.0 + pg_bigm 1.2 |
 | `Ym-Dev-Identity` | ✅ DEPLOYED | Cognito User Pool + Hosted UI + Google IdP |
 | `Ym-Dev-Api` | ✅ DEPLOYED | HTTP API + JWT Authorizer, 5 service Lambdas, 3 SSE Function URLs (codef-sync, tax-strategy, fx-strategy) |
 | `Ym-Dev-Ingestion` | ✅ DEPLOYED | EventBridge schedule + SFN (scheduled CODEF fetch) + SQS classify worker + FxCollectorFn (ECOS hourly) |
@@ -138,6 +138,18 @@ POST   /tenants/{id}/fx/strategy  (SSE Function URL)   — exposure_summary / co
 - **`discarded`** — 사용자가 폐기. row 는 audit 용으로 보존, 집계에서 제외
 
 별도 draft 테이블 없음. 재무제표(P&L, BS, CF, TB)도 certain/uncertain/total 로 분해해서 반환. 자세한 응답 형식은 `docs/API_LIST.md` 참조.
+
+## External Dependencies
+
+| 시스템 | 용도 |
+|---|---|
+| **CODEF** | 은행/카드/홈택스 거래 수집 |
+| **ECOS (한국은행)** | USD/KRW + 다통화 환율 |
+| **OPEN_LAW (법제처)** | 조특법·법인세법 등 법령 코퍼스 |
+| **KASI 특일정보** | 한국 공휴일 |
+| **Google OAuth** | Cognito IdP |
+| **AWS Bedrock** | Sonnet/Opus 추론, KB (Titan v2 임베딩), Rerank |
+| **Aurora PostgreSQL 15.15** | 메인 DB — pgvector 0.8.0, pg_bigm 1.2 확장 포함. 커스텀 DB 클러스터 파라미터 그룹 (`shared_preload_libraries=pg_bigm`, work_mem/maintenance_work_mem 튜닝). Bedrock Knowledge Base가 RDS Data API를 통해 직접 연결. |
 
 ## Architecture
 
@@ -278,3 +290,9 @@ AWS 가 RDS regional CA 를 회전할 때 (보통 5년 주기) 갱신:
 - **PATCH /entries idempotency**: 라인 정정 + confirm 흐름에 `Idempotency-Key` 추가 검토.
 - **CDK Pipelines**: 로컬 `cdk deploy` only. GitHub Actions는 synth만 실행. PR-driven deploy는 Phase 1.
 - **Domain & Route53**: 미설정. Public endpoint 노출 전 결정.
+
+## Operational Notes
+
+### Bedrock KB DB 자격증명 시크릿 로테이션
+
+`bedrock-kb-db-credentials` 시크릿에는 자동 로테이션이 설정되어 있지 않다. 이후 로테이션을 활성화할 경우, `KbPasswordBinder` Custom Resource를 재배포하여 새 비밀번호를 `bedrock_kb_user` DB 역할에 반영해야 한다. 로테이션 Lambda를 추가하거나 로테이션 후 `cdk deploy Ym-Dev-Data`를 다시 실행하면 된다.

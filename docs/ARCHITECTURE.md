@@ -149,11 +149,16 @@ EventBridge (cron 매월 1일)         ──► FilingObligationGeneratorFn
 - **SQS ClassifyTasksQueue**: `visibilityTimeout` 180s (= worker timeout 30s × 6 margin), `maxReceiveCount` 3 → DLQ 14d 보관.
 - **DLQ depth alarm**: 메시지 ≥ 1 5분 → SNS topic `IngestionAlarmTopic`.
 - **Legal Knowledge Base** ([ingestion/legal-kb.construct.ts](../infrastructure/lib/stacks/ingestion/legal-kb.construct.ts)):
-  - 백엔드: **S3 Vectors** (1024 차원, cosine, `legal-kb-index`).
-  - Embed: `amazon.titan-embed-text-v2:0` (ap-northeast-2).
+  - 백엔드: **Aurora pgvector** (PostgreSQL 15.15, pgvector 0.8.0, pg_bigm 1.2).
+  - 벡터 테이블: `bedrock_integration.bedrock_kb_legal` — `vector(1024)`, cosine, HNSW 인덱스.
+  - 한국어 키워드 검색: `chunks` 컬럼에 pg_bigm GIN 인덱스 → KB `overrideSearchType: 'HYBRID'` 실효화.
+  - KB → DB 연결: RDS Data API (HTTPS 퍼블릭 엔드포인트, VPC 피어링 불필요).
+  - KB 인증: 전용 스코프 역할 `bedrock_kb_user` — 비밀은 AWS Secrets Manager (`bedrock-kb-db-credentials`).
+  - Embed: `amazon.titan-embed-text-v2:0` (ap-northeast-2), 1024 차원, cosine.
   - Data source: `s3://...legal-kb-bucket/chunks/` (사전 chunking, `ChunkingStrategy: 'NONE'`).
   - 월 1회 SFN 이 (1) OPEN_LAW 페치 → S3 업로드, (2) `StartIngestionJob` 호출.
   - Rerank: `cohere.rerank-v3-5:0` in `ap-northeast-1` (KB 와 다른 리전 — 비용 최적화).
+  - **마이그레이션 이력**: 2026-05-12 ~ 2026-05-17 S3 Vectors 백엔드 사용. S3 Vectors의 필터가능 메타데이터 2KB 제한으로 한국 법령 코퍼스 수집 92.7% 실패 → Aurora pgvector 로 전환.
 
 ### 2.6 Api Stack ([infrastructure/lib/stacks/api.stack.ts](../infrastructure/lib/stacks/api.stack.ts))
 
