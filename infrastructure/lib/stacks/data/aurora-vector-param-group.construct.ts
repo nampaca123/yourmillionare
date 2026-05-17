@@ -1,11 +1,13 @@
 // Aurora vector parameter group: tuned for pgvector HNSW workloads + pg_bigm preload.
 
+import { RemovalPolicy } from 'aws-cdk-lib';
 import { ParameterGroup } from 'aws-cdk-lib/aws-rds';
 import type { IEngine, IParameterGroup } from 'aws-cdk-lib/aws-rds';
 import { Construct } from 'constructs';
 
 export interface AuroraVectorParamGroupProps {
   readonly engine: IEngine;
+  readonly removalPolicy?: RemovalPolicy;
 }
 
 export class AuroraVectorParamGroup extends Construct {
@@ -17,6 +19,7 @@ export class AuroraVectorParamGroup extends Construct {
     this.parameterGroup = new ParameterGroup(this, 'ParamGroup', {
       engine: props.engine,
       description: 'Aurora pg15 with pg_bigm preload and vector workload tuning',
+      removalPolicy: props.removalPolicy,
       parameters: {
         shared_preload_libraries: 'pg_bigm',
         work_mem: '65536',

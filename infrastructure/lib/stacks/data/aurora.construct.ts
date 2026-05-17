@@ -58,6 +58,7 @@ export class AuroraConstruct {
 
     const vectorParamGroup = new AuroraVectorParamGroup(scope, `${id}VectorParamGroup`, {
       engine: clusterEngine,
+      removalPolicy: isProd ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY,
     });
 
     this.cluster = new DatabaseCluster(scope, id, {
