@@ -28,7 +28,7 @@ Foundation ──┬── Network ──┬── Data ──┬── Ingestio
 | `Ym-Dev-Network` | VPC (`10.20.0.0/16`, 3 AZ), fck-nat, 4 VPC endpoints, Flow Logs | `vpc`, `lambdaSg`, `auroraSg` |
 | `Ym-Dev-Data` | Aurora Serverless v2 + 4 DynamoDB 테이블 + 스키마 마이그레이터 | `aurora.cluster`, `cache.*`, `bedrockKbDbSecret` |
 | `Ym-Dev-Identity` | Cognito User Pool + Google IdP + Hosted UI | `userPool`, `userPoolClient`, `issuerUrl` |
-| `Ym-Dev-Ingestion` | EventBridge + Step Functions + SQS + 7 Lambda + Bedrock KB | `legalKbId`, `filingGeneratorFn`, `legalSyncStateMachineArn` |
+| `Ym-Dev-Ingestion` | EventBridge + Step Functions + SQS + 7 Lambda + Bedrock KB | `filingGeneratorFn`, `legalSyncStateMachineArn` (KB id는 CfnOutput만; Api는 `BEDROCK_KB_ID` env로 수신) |
 | `Ym-Dev-Api` | HTTP API + JWT Authorizer + 5 service Lambda + 3 SSE Function URL | (terminal) |
 
 ---
