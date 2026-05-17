@@ -37,7 +37,7 @@ All 6 stacks deployed to `ap-northeast-2` (account 823401933116). Bedrock Sonnet
 |-------|--------|-------|
 | `Ym-Dev-Foundation` | ✅ DEPLOYED | KMS CMK + CODEF/ECOS credential secret slots |
 | `Ym-Dev-Network` | ✅ DEPLOYED | VPC, fck-nat, VPC endpoints, Flow Logs |
-| `Ym-Dev-Data` | ✅ DEPLOYED | Aurora Serverless v2 PG 15.15, DynamoDB tables, migrations 0001–0026, pgvector 0.8.0 + pg_bigm 1.2 |
+| `Ym-Dev-Data` | ✅ DEPLOYED | Aurora Serverless v2 PG 15.10, DynamoDB tables, migrations 0001–0026, pgvector 0.8.0 + pg_bigm 1.2 |
 | `Ym-Dev-Identity` | ✅ DEPLOYED | Cognito User Pool + Hosted UI + Google IdP |
 | `Ym-Dev-Api` | ✅ DEPLOYED | HTTP API + JWT Authorizer, 5 service Lambdas, 3 SSE Function URLs (codef-sync, tax-strategy, fx-strategy) |
 | `Ym-Dev-Ingestion` | ✅ DEPLOYED | EventBridge schedule + SFN (scheduled CODEF fetch) + SQS classify worker + FxCollectorFn (ECOS hourly) |
@@ -149,7 +149,7 @@ POST   /tenants/{id}/fx/strategy  (SSE Function URL)   — exposure_summary / co
 | **KASI 특일정보** | 한국 공휴일 |
 | **Google OAuth** | Cognito IdP |
 | **AWS Bedrock** | Sonnet/Opus 추론, KB (Titan v2 임베딩), Rerank |
-| **Aurora PostgreSQL 15.15** | 메인 DB — pgvector 0.8.0, pg_bigm 1.2 확장 포함. 커스텀 DB 클러스터 파라미터 그룹 (`shared_preload_libraries=pg_bigm`, work_mem/maintenance_work_mem 튜닝). Bedrock Knowledge Base가 RDS Data API를 통해 직접 연결. |
+| **Aurora PostgreSQL 15.10** | 메인 DB — pgvector 0.8.0, pg_bigm 1.2 확장 포함. 커스텀 DB 클러스터 파라미터 그룹 (`shared_preload_libraries=pg_bigm`, work_mem/maintenance_work_mem 튜닝). Bedrock Knowledge Base가 RDS Data API를 통해 직접 연결. |
 
 ## Architecture
 
@@ -295,4 +295,4 @@ AWS 가 RDS regional CA 를 회전할 때 (보통 5년 주기) 갱신:
 
 ### Bedrock KB DB 자격증명 시크릿 로테이션
 
-`bedrock-kb-db-credentials` 시크릿에는 자동 로테이션이 설정되어 있지 않다. 이후 로테이션을 활성화할 경우, `KbPasswordBinder` Custom Resource를 재배포하여 새 비밀번호를 `bedrock_kb_user` DB 역할에 반영해야 한다. 로테이션 Lambda를 추가하거나 로테이션 후 `cdk deploy Ym-Dev-Data`를 다시 실행하면 된다.
+`bedrock-kb-db-credentials` 시크릿에는 자동 로테이션이 설정되어 있지 않다. 이후 로테이션을 활성화할 경우, `KbPasswordBinder` Custom Resource를 재배포하여 새 비밀번호를 `bedrock_kb_user` DB 역할에 반영해야 한다. 로테이션 Lambda를 추가하거나 로테이션 후 `cdk deploy Ym-Dev-Data`를 다시 실행하면 된다. 로테이션 후 Bedrock KB 수집 작업(`StartIngestionJob`)과 조회를 한 번씩 수동 검증하여 RDS Data API 연결이 정상인지 확인한다.
