@@ -1,22 +1,26 @@
-// Construct: S3 Vectors index + Bedrock Knowledge Base + S3 data source + execution role for legal corpus retrieval.
+// Construct: Bedrock Knowledge Base wired to Aurora pgvector storage + S3 data source for legal corpus retrieval.
 
-import { CfnResource, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { CfnResource, Stack } from 'aws-cdk-lib';
 import type { IBucket } from 'aws-cdk-lib/aws-s3';
 import { Effect, PolicyDocument, PolicyStatement, Role, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
+import type { ISecret } from 'aws-cdk-lib/aws-secretsmanager';
+import type { IKey } from 'aws-cdk-lib/aws-kms';
+import type { DatabaseCluster } from 'aws-cdk-lib/aws-rds';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
 const EMBED_MODEL_DEFAULT = 'amazon.titan-embed-text-v2:0';
 const EMBED_DIMENSION_DEFAULT = 1024;
-const VECTOR_DATA_TYPE = 'float32';
-const VECTOR_DISTANCE_METRIC = 'cosine';
-const VECTOR_INDEX_NAME = 'legal-kb-index';
 const INCLUSION_PREFIX = 'chunks/';
+const KB_TABLE_NAME = 'bedrock_integration.bedrock_kb_legal';
+const KB_DATABASE_NAME = 'yourmillionare';
 
 export interface LegalKbConstructProps {
   readonly corpusBucket: IBucket;
   readonly kbName: string;
-  readonly vectorBucketName: string;
+  readonly auroraCluster: DatabaseCluster;
+  readonly auroraKbSecret: ISecret;
+  readonly auroraKbSecretKey: IKey;
   readonly embedModel?: string;
   readonly embedDimension?: number;
   readonly embedRegion?: string;
@@ -26,7 +30,6 @@ export class LegalKbConstruct extends Construct {
   public readonly kbId: string;
   public readonly dataSourceId: string;
   public readonly kbArn: string;
-  public readonly vectorIndexArn: string;
 
   constructor(scope: Construct, id: string, props: LegalKbConstructProps) {
     super(scope, id);
@@ -38,38 +41,6 @@ export class LegalKbConstruct extends Construct {
     const embedRegion = props.embedRegion ?? region;
     const embedModelArn = `arn:aws:bedrock:${embedRegion}::foundation-model/${embedModel}`;
 
-    // --- S3 Vectors bucket (vector store backend) ---
-    const vectorBucket = new CfnResource(this, 'VectorBucket', {
-      type: 'AWS::S3Vectors::VectorBucket',
-      properties: {
-        VectorBucketName: props.vectorBucketName,
-        EncryptionConfiguration: { SseType: 'AES256' },
-      },
-    });
-    vectorBucket.applyRemovalPolicy(RemovalPolicy.RETAIN);
-
-    const vectorBucketArn = `arn:aws:s3vectors:${region}:${account}:bucket/${props.vectorBucketName}`;
-    const vectorIndexArn = `${vectorBucketArn}/index/${VECTOR_INDEX_NAME}`;
-
-    // --- Vector index — fixed dimension matches Cohere embed-v4 default ---
-    const vectorIndex = new CfnResource(this, 'VectorIndex', {
-      type: 'AWS::S3Vectors::Index',
-      properties: {
-        VectorBucketName: props.vectorBucketName,
-        IndexName: VECTOR_INDEX_NAME,
-        DataType: VECTOR_DATA_TYPE,
-        Dimension: embedDimension,
-        DistanceMetric: VECTOR_DISTANCE_METRIC,
-        MetadataConfiguration: {
-          NonFilterableMetadataKeys: ['excerpt', 'paragraph', 'item'],
-        },
-      },
-    });
-    vectorIndex.addDependency(vectorBucket);
-    vectorIndex.applyRemovalPolicy(RemovalPolicy.RETAIN);
-    this.vectorIndexArn = vectorIndexArn;
-
-    // --- KB execution role (assumed by bedrock.amazonaws.com) ---
     const kbRole = new Role(this, 'KbRole', {
       assumedBy: new ServicePrincipal('bedrock.amazonaws.com', {
         conditions: {
@@ -97,20 +68,41 @@ export class LegalKbConstruct extends Construct {
             }),
           ],
         }),
-        S3Vectors: new PolicyDocument({
+        RdsDataApi: new PolicyDocument({
           statements: [
             new PolicyStatement({
               effect: Effect.ALLOW,
               actions: [
-                's3vectors:GetVectorBucket',
-                's3vectors:GetIndex',
-                's3vectors:PutVectors',
-                's3vectors:GetVectors',
-                's3vectors:ListVectors',
-                's3vectors:QueryVectors',
-                's3vectors:DeleteVectors',
+                'rds-data:ExecuteStatement',
+                'rds-data:BatchExecuteStatement',
+                'rds-data:BeginTransaction',
+                'rds-data:CommitTransaction',
+                'rds-data:RollbackTransaction',
               ],
-              resources: [vectorBucketArn, vectorIndexArn],
+              resources: [props.auroraCluster.clusterArn],
+            }),
+            new PolicyStatement({
+              effect: Effect.ALLOW,
+              actions: ['rds:DescribeDBClusters'],
+              resources: [props.auroraCluster.clusterArn],
+            }),
+          ],
+        }),
+        SecretAccess: new PolicyDocument({
+          statements: [
+            new PolicyStatement({
+              effect: Effect.ALLOW,
+              actions: ['secretsmanager:GetSecretValue'],
+              resources: [props.auroraKbSecret.secretArn],
+            }),
+          ],
+        }),
+        KmsDecrypt: new PolicyDocument({
+          statements: [
+            new PolicyStatement({
+              effect: Effect.ALLOW,
+              actions: ['kms:Decrypt'],
+              resources: [props.auroraKbSecretKey.keyArn],
             }),
           ],
         }),
@@ -123,13 +115,12 @@ export class LegalKbConstruct extends Construct {
         {
           id: 'AwsSolutions-IAM5',
           reason:
-            'Bedrock KB ingestion role needs s3:GetObject across the corpus bucket prefix (chunks/*) because object keys are generated per-law-revision by MonthlyLawSyncFn, and s3vectors actions across the vector bucket index. All resource ARNs are scoped to this construct.',
+            'Bedrock KB ingestion role needs s3:GetObject across the corpus bucket prefix (chunks/*) because corpus object keys are generated dynamically per law revision. All other resources are scoped to specific ARNs.',
         },
       ],
       true,
     );
 
-    // --- Bedrock Knowledge Base wired to S3 Vectors backend + Cohere embed-v4 ---
     const kb = new CfnResource(this, 'KnowledgeBase', {
       type: 'AWS::Bedrock::KnowledgeBase',
       properties: {
@@ -148,17 +139,26 @@ export class LegalKbConstruct extends Construct {
           },
         },
         StorageConfiguration: {
-          Type: 'S3_VECTORS',
-          S3VectorsConfiguration: { IndexArn: vectorIndexArn },
+          Type: 'RDS',
+          RdsConfiguration: {
+            ResourceArn: props.auroraCluster.clusterArn,
+            CredentialsSecretArn: props.auroraKbSecret.secretArn,
+            DatabaseName: KB_DATABASE_NAME,
+            TableName: KB_TABLE_NAME,
+            FieldMapping: {
+              PrimaryKeyField: 'id',
+              VectorField: 'embedding',
+              TextField: 'chunks',
+              MetadataField: 'metadata',
+              CustomMetadataField: 'custom_metadata',
+            },
+          },
         },
       },
     });
-    kb.addDependency(vectorIndex);
-    kb.applyRemovalPolicy(RemovalPolicy.RETAIN);
     this.kbId = kb.getAtt('KnowledgeBaseId').toString();
     this.kbArn = kb.getAtt('KnowledgeBaseArn').toString();
 
-    // --- Data source pointing at chunks/ prefix; chunks are pre-chunked JSON with .metadata.json sidecars ---
     const dataSource = new CfnResource(this, 'DataSource', {
       type: 'AWS::Bedrock::DataSource',
       properties: {

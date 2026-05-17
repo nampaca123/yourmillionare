@@ -41,3 +41,6 @@ docs/api-e2e-raw.ndjson
 docs/api-e2e-meta.json
 docs/codef-e2e-raw.ndjson
 docs/codef-e2e-meta.json
+
+# pnpm-lock.yaml — project uses npm workspaces; CI installs deps via npm ci
+**/pnpm-lock.yaml

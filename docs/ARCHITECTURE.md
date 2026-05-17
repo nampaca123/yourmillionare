@@ -26,9 +26,9 @@ Foundation ──┬── Network ──┬── Data ──┬── Ingestio
 |---|---|---|
 | `Ym-Dev-Foundation` | Shared KMS CMK, CODEF/ECOS Secret slot | `sharedKey`, `codefCredentialSecret`, `ecosCredentialSecret` |
 | `Ym-Dev-Network` | VPC (`10.20.0.0/16`, 3 AZ), fck-nat, 4 VPC endpoints, Flow Logs | `vpc`, `lambdaSg`, `auroraSg` |
-| `Ym-Dev-Data` | Aurora Serverless v2 + 4 DynamoDB 테이블 + 스키마 마이그레이터 | `aurora.cluster`, `cache.*` |
+| `Ym-Dev-Data` | Aurora Serverless v2 + 4 DynamoDB 테이블 + 스키마 마이그레이터 | `aurora.cluster`, `cache.*`, `bedrockKbDbSecret` |
 | `Ym-Dev-Identity` | Cognito User Pool + Google IdP + Hosted UI | `userPool`, `userPoolClient`, `issuerUrl` |
-| `Ym-Dev-Ingestion` | EventBridge + Step Functions + SQS + 7 Lambda + Bedrock KB | `legalKbId`, `filingGeneratorFn`, `legalSyncStateMachineArn` |
+| `Ym-Dev-Ingestion` | EventBridge + Step Functions + SQS + 7 Lambda + Bedrock KB | `filingGeneratorFn`, `legalSyncStateMachineArn` (KB id는 CfnOutput만; Api는 `BEDROCK_KB_ID` env로 수신) |
 | `Ym-Dev-Api` | HTTP API + JWT Authorizer + 5 service Lambda + 3 SSE Function URL | (terminal) |
 
 ---
@@ -69,7 +69,7 @@ VPC 10.20.0.0/16  (3 AZ — a/b/c)
 | 속성 | dev | prod |
 |---|---|---|
 | Engine | Aurora PostgreSQL 15.10 | 동일 |
-| Capacity (ACU) | 0.5 ~ **2** | 0.5 ~ **4** |
+| Capacity (ACU) | 0.5 ~ **4** | 0.5 ~ **8** |
 | Writer | 1 (Serverless v2) | 1 (Serverless v2) — reader 없음 |
 | 서브넷 | `PRIVATE_ISOLATED` | 동일 |
 | 인증 | IAM auth + Data API + master secret | 동일 |
@@ -149,11 +149,16 @@ EventBridge (cron 매월 1일)         ──► FilingObligationGeneratorFn
 - **SQS ClassifyTasksQueue**: `visibilityTimeout` 180s (= worker timeout 30s × 6 margin), `maxReceiveCount` 3 → DLQ 14d 보관.
 - **DLQ depth alarm**: 메시지 ≥ 1 5분 → SNS topic `IngestionAlarmTopic`.
 - **Legal Knowledge Base** ([ingestion/legal-kb.construct.ts](../infrastructure/lib/stacks/ingestion/legal-kb.construct.ts)):
-  - 백엔드: **S3 Vectors** (1024 차원, cosine, `legal-kb-index`).
-  - Embed: `amazon.titan-embed-text-v2:0` (ap-northeast-2).
+  - 백엔드: **Aurora pgvector** (PostgreSQL 15.10, pgvector 0.8.0, pg_bigm 1.2).
+  - 벡터 테이블: `bedrock_integration.bedrock_kb_legal` — `vector(1024)`, cosine, HNSW 인덱스.
+  - 한국어 키워드 검색: `chunks` 컬럼에 pg_bigm GIN 인덱스. KB 호출 시 `overrideSearchType: 'HYBRID'`로 벡터+키워드 혼합 검색 활성화.
+  - KB → DB 연결: RDS Data API (HTTPS 퍼블릭 엔드포인트, VPC 피어링 불필요).
+  - KB 인증: 전용 스코프 역할 `bedrock_kb_user` — 비밀은 AWS Secrets Manager (`bedrock-kb-db-credentials`).
+  - Embed: `amazon.titan-embed-text-v2:0` (ap-northeast-2), 1024 차원, cosine.
   - Data source: `s3://...legal-kb-bucket/chunks/` (사전 chunking, `ChunkingStrategy: 'NONE'`).
   - 월 1회 SFN 이 (1) OPEN_LAW 페치 → S3 업로드, (2) `StartIngestionJob` 호출.
   - Rerank: `cohere.rerank-v3-5:0` in `ap-northeast-1` (KB 와 다른 리전 — 비용 최적화).
+  - **마이그레이션 이력**: 2026-05-12 ~ 2026-05-17 S3 Vectors 백엔드 사용. S3 Vectors의 필터가능 메타데이터 2KB 제한으로 한국 법령 코퍼스 수집 92.7% 실패 → Aurora pgvector 로 전환.
 
 ### 2.6 Api Stack ([infrastructure/lib/stacks/api.stack.ts](../infrastructure/lib/stacks/api.stack.ts))
 
@@ -326,7 +331,7 @@ Function URL (regional, no API GW)
 
 PR-A (2026-05-13) 부터 Aurora writer 앞에 RDS Proxy 가 위치한다.
 
-- **이유**: ACU 비례 `max_connections` (dev 2 ACU ≈ ~430, prod 4 ACU ≈ ~870) 가 동시 Lambda 1000 인스턴스 burst 에 부족해질 수 있음. Proxy 가 client-side 와 backend 를 multiplex 해 connection storm 차단.
+- **이유**: ACU 비례 `max_connections` (dev 4 ACU ≈ ~860, prod 8 ACU ≈ ~1740) 가 동시 Lambda 1000 인스턴스 burst 에 부족해질 수 있음. Proxy 가 client-side 와 backend 를 multiplex 해 connection storm 차단.
 - **RLS 호환성**: `set_config(..., is_local=true)` 가 이미 transaction-scoped 라 Proxy pinning 트리거가 아님. `RESET app.*` 는 PR-A 에서 제거 (session-level statement, pinning 트리거).
 - **연결 경로**: Lambda → IAM token → Proxy endpoint → master secret → Aurora writer.
 - **운영 측정**: §7 의 RDS Proxy metrics 행. `ConnectionBorrowLatency p99 > 50ms`, `DatabaseConnections > 80%`, `ClientConnectionsBorrowing` spike 알람.
@@ -442,7 +447,7 @@ PR-A 시도 중 발견: **AWS WAF v2 는 API Gateway HTTP API v2 와 association
 |---|---|
 | 계정 | 단일 (`823401933116`) |
 | 스택 prefix | `Ym-Dev-*` / `Ym-Prod-*` |
-| Aurora capacity | dev 0.5-2 ACU / prod 0.5-4 ACU |
+| Aurora capacity | dev 0.5-4 ACU / prod 0.5-8 ACU |
 | NAT instance | dev 1 (SPOF) / prod 3 (per AZ) |
 | Cognito | dev MFA OFF / prod MFA OPTIONAL + AdvancedSecurity ENFORCED |
 | Lambda log level | dev `debug` / prod `info` |

@@ -123,6 +123,9 @@ const ingestion = new IngestionStack(app, `${config.stackPrefix}-Ingestion`, {
   sharedKey: foundation.sharedKey,
   transactionCache: data.cache.transactionCache,
   bedrockEmbedModel: config.bedrockEmbedModel,
+  auroraCluster: data.aurora.cluster,
+  bedrockKbDbSecret: data.bedrockKbDbSecret,
+  bedrockKbDbSecretKey: data.bedrockKbDbSecretKey,
 });
 ingestion.addDependency(network);
 ingestion.addDependency(data);
@@ -140,7 +143,6 @@ const api = new ApiStack(app, `${config.stackPrefix}-Api`, {
   codefSecret: foundation.codefCredentialSecret,
   ecosSecret: foundation.ecosCredentialSecret,
   legalSyncStateMachineArn: ingestion.legalSyncStateMachineArn,
-  legalKbId: ingestion.legalKbId,
   filingGeneratorFnArn: ingestion.filingGeneratorFn.functionArn,
   filingGeneratorFnName: ingestion.filingGeneratorFn.functionName,
 });
@@ -148,7 +150,6 @@ api.addDependency(network);
 api.addDependency(data);
 api.addDependency(identity);
 api.addDependency(foundation);
-api.addDependency(ingestion);
 api.addDependency(ingestion);
 
 Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));
