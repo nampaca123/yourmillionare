@@ -81,6 +81,11 @@ export class LegalKbConstruct extends Construct {
               ],
               resources: [props.auroraCluster.clusterArn],
             }),
+            new PolicyStatement({
+              effect: Effect.ALLOW,
+              actions: ['rds:DescribeDBClusters'],
+              resources: [props.auroraCluster.clusterArn],
+            }),
           ],
         }),
         SecretAccess: new PolicyDocument({
