@@ -56,6 +56,7 @@ export interface IngestionStackProps extends StackProps {
   readonly bedrockEmbedModel: string;
   readonly auroraCluster: DatabaseCluster;
   readonly bedrockKbDbSecret: ISecret;
+  readonly bedrockKbDbSecretKey: IKey;
 }
 
 export class IngestionStack extends Stack {
@@ -426,6 +427,7 @@ export class IngestionStack extends Stack {
       kbName: `legal-kb-${isProdEnv ? 'prod' : 'dev'}`,
       auroraCluster: props.auroraCluster,
       auroraKbSecret: props.bedrockKbDbSecret,
+      auroraKbSecretKey: props.bedrockKbDbSecretKey,
       embedModel: props.bedrockEmbedModel,
       embedDimension: 1024,
       embedRegion: region,

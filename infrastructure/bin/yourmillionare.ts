@@ -125,6 +125,7 @@ const ingestion = new IngestionStack(app, `${config.stackPrefix}-Ingestion`, {
   bedrockEmbedModel: config.bedrockEmbedModel,
   auroraCluster: data.aurora.cluster,
   bedrockKbDbSecret: data.bedrockKbDbSecret,
+  bedrockKbDbSecretKey: data.bedrockKbDbSecretKey,
 });
 ingestion.addDependency(network);
 ingestion.addDependency(data);

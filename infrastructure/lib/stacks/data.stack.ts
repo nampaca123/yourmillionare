@@ -5,12 +5,13 @@ import { readFileSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
-import { CfnOutput, CustomResource, Duration, Stack } from 'aws-cdk-lib';
+import { CfnOutput, CustomResource, Duration, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import type { StackProps } from 'aws-cdk-lib';
 import { Alarm, ComparisonOperator, Metric, TreatMissingData } from 'aws-cdk-lib/aws-cloudwatch';
 import { SnsAction } from 'aws-cdk-lib/aws-cloudwatch-actions';
 import type { ISecurityGroup, IVpc } from 'aws-cdk-lib/aws-ec2';
 import { SubnetType } from 'aws-cdk-lib/aws-ec2';
+import { Key } from 'aws-cdk-lib/aws-kms';
 import type { IKey } from 'aws-cdk-lib/aws-kms';
 import { HostedRotation, Secret } from 'aws-cdk-lib/aws-secretsmanager';
 import type { ISecret } from 'aws-cdk-lib/aws-secretsmanager';
@@ -62,6 +63,7 @@ export class DataStack extends Stack {
   public readonly aurora: AuroraConstruct;
   public readonly cache: CacheConstruct;
   public readonly bedrockKbDbSecret: ISecret;
+  public readonly bedrockKbDbSecretKey: IKey;
 
   constructor(scope: Construct, id: string, props: DataStackProps) {
     super(scope, id, props);
@@ -173,9 +175,15 @@ export class DataStack extends Stack {
     // --- Bedrock KB scoped DB secret + password binder ---
     const KB_SECRET_PASSWORD_LENGTH = 32;
 
+    const kbDbSecretKey = new Key(this, 'BedrockKbDbSecretKey', {
+      description: 'KMS key for Bedrock KB DB credentials secret encryption',
+      enableKeyRotation: true,
+      removalPolicy: isProd ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY,
+    });
+
     const kbDbSecret = new Secret(this, 'BedrockKbDbSecret', {
       secretName: `${this.stackName}-bedrock-kb-db-credentials`,
-      encryptionKey: props.sharedKey,
+      encryptionKey: kbDbSecretKey,
       generateSecretString: {
         secretStringTemplate: JSON.stringify({
           username: 'bedrock_kb_user',
@@ -191,6 +199,17 @@ export class DataStack extends Stack {
       },
     });
     this.bedrockKbDbSecret = kbDbSecret;
+    this.bedrockKbDbSecretKey = kbDbSecretKey;
+
+    NagSuppressions.addResourceSuppressions(
+      kbDbSecret,
+      [
+        {
+          id: 'AwsSolutions-SMG4',
+          reason: 'Bedrock KB DB credentials secret rotation is operator-driven: rotating requires a follow-up cdk deploy so KbPasswordBinder Custom Resource applies the new password to the bedrock_kb_user role. Documented in README operational notes.',
+        },
+      ],
+    );
 
     const kbPasswordBinderFn = new NodejsFunction(this, 'KbPasswordBinderFn', {
       entry: LAMBDA_ENTRY('kb-password-binder.lambda.ts'),
@@ -211,12 +230,6 @@ export class DataStack extends Stack {
     aurora.cluster.grantDataApiAccess(kbPasswordBinderFn);
     aurora.masterSecret.grantRead(kbPasswordBinderFn);
     kbDbSecret.grantRead(kbPasswordBinderFn);
-    kbPasswordBinderFn.addToRolePolicy(
-      new PolicyStatement({
-        actions: ['kms:Decrypt', 'kms:GenerateDataKey'],
-        resources: [props.sharedKey.keyArn],
-      }),
-    );
 
     const kbPasswordBinderProvider = new Provider(this, 'KbPasswordBinderProvider', {
       onEventHandler: kbPasswordBinderFn,

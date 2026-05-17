@@ -4,6 +4,7 @@ import { CfnResource, RemovalPolicy, Stack } from 'aws-cdk-lib';
 import type { IBucket } from 'aws-cdk-lib/aws-s3';
 import { Effect, PolicyDocument, PolicyStatement, Role, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
 import type { ISecret } from 'aws-cdk-lib/aws-secretsmanager';
+import type { IKey } from 'aws-cdk-lib/aws-kms';
 import type { DatabaseCluster } from 'aws-cdk-lib/aws-rds';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
@@ -19,6 +20,7 @@ export interface LegalKbConstructProps {
   readonly kbName: string;
   readonly auroraCluster: DatabaseCluster;
   readonly auroraKbSecret: ISecret;
+  readonly auroraKbSecretKey: IKey;
   readonly embedModel?: string;
   readonly embedDimension?: number;
   readonly embedRegion?: string;
@@ -81,10 +83,26 @@ export class LegalKbConstruct extends Construct {
             }),
           ],
         }),
+        SecretAccess: new PolicyDocument({
+          statements: [
+            new PolicyStatement({
+              effect: Effect.ALLOW,
+              actions: ['secretsmanager:GetSecretValue'],
+              resources: [props.auroraKbSecret.secretArn],
+            }),
+          ],
+        }),
+        KmsDecrypt: new PolicyDocument({
+          statements: [
+            new PolicyStatement({
+              effect: Effect.ALLOW,
+              actions: ['kms:Decrypt'],
+              resources: [props.auroraKbSecretKey.keyArn],
+            }),
+          ],
+        }),
       },
     });
-
-    props.auroraKbSecret.grantRead(kbRole);
 
     NagSuppressions.addResourceSuppressions(
       kbRole,
