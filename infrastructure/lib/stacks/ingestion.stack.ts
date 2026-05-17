@@ -13,7 +13,9 @@ import { Rule, Schedule } from 'aws-cdk-lib/aws-events';
 import { LambdaFunction, SfnStateMachine } from 'aws-cdk-lib/aws-events-targets';
 import { PolicyStatement } from 'aws-cdk-lib/aws-iam';
 import type { IKey } from 'aws-cdk-lib/aws-kms';
+import type { DatabaseCluster } from 'aws-cdk-lib/aws-rds';
 import { BlockPublicAccess, Bucket, BucketEncryption } from 'aws-cdk-lib/aws-s3';
+import type { ISecret } from 'aws-cdk-lib/aws-secretsmanager';
 import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -52,6 +54,8 @@ export interface IngestionStackProps extends StackProps {
   readonly sharedKey: IKey;
   readonly transactionCache: ITable;
   readonly bedrockEmbedModel: string;
+  readonly auroraCluster: DatabaseCluster;
+  readonly bedrockKbDbSecret: ISecret;
 }
 
 export class IngestionStack extends Stack {
@@ -415,13 +419,13 @@ export class IngestionStack extends Stack {
 
     // Manual /fs/sync is served via the SSE Function URL (CodefSyncStreamFn in ApiStack) — no Step Functions involved.
 
-    // --- Bedrock Knowledge Base over the legal corpus (S3 Vectors backend, Cohere embed-v4 in Seoul) ---
+    // --- Bedrock Knowledge Base over the legal corpus (Aurora pgvector backend) ---
     const isProdEnv = props.deploymentEnv === 'prod';
-    const vectorBucketName = `ym-${isProdEnv ? 'prod' : 'dev'}-legal-kb-v2-${account}`.toLowerCase();
     const legalKb = new LegalKbConstruct(this, 'LegalKbV2', {
       corpusBucket: legalKbBucket,
       kbName: `legal-kb-${isProdEnv ? 'prod' : 'dev'}`,
-      vectorBucketName,
+      auroraCluster: props.auroraCluster,
+      auroraKbSecret: props.bedrockKbDbSecret,
       embedModel: props.bedrockEmbedModel,
       embedDimension: 1024,
       embedRegion: region,

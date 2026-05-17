@@ -123,6 +123,8 @@ const ingestion = new IngestionStack(app, `${config.stackPrefix}-Ingestion`, {
   sharedKey: foundation.sharedKey,
   transactionCache: data.cache.transactionCache,
   bedrockEmbedModel: config.bedrockEmbedModel,
+  auroraCluster: data.aurora.cluster,
+  bedrockKbDbSecret: data.bedrockKbDbSecret,
 });
 ingestion.addDependency(network);
 ingestion.addDependency(data);
