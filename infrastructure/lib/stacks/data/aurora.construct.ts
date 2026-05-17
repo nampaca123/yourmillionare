@@ -68,7 +68,7 @@ export class AuroraConstruct {
         performanceInsightRetention: PerformanceInsightRetention.DEFAULT,
       }),
       serverlessV2MinCapacity: isProd ? 0.5 : 0.5,
-      serverlessV2MaxCapacity: isProd ? 4 : 2,
+      serverlessV2MaxCapacity: isProd ? 8 : 4,
       credentials: Credentials.fromGeneratedSecret('postgres', {
         encryptionKey: secretKey,
       }),
