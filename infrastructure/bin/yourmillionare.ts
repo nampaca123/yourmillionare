@@ -143,7 +143,6 @@ const api = new ApiStack(app, `${config.stackPrefix}-Api`, {
   codefSecret: foundation.codefCredentialSecret,
   ecosSecret: foundation.ecosCredentialSecret,
   legalSyncStateMachineArn: ingestion.legalSyncStateMachineArn,
-  legalKbId: ingestion.legalKbId,
   filingGeneratorFnArn: ingestion.filingGeneratorFn.functionArn,
   filingGeneratorFnName: ingestion.filingGeneratorFn.functionName,
 });

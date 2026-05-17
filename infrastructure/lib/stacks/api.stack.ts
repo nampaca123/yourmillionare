@@ -37,7 +37,6 @@ export interface ApiStackProps extends StackProps {
   readonly codefSecret: ISecret;
   readonly ecosSecret: ISecret;
   readonly legalSyncStateMachineArn?: string;
-  readonly legalKbId?: string;
   readonly filingGeneratorFnArn?: string;
   readonly filingGeneratorFnName?: string;
 }
@@ -293,7 +292,7 @@ export class ApiStack extends Stack {
         LOG_LEVEL: isProd ? 'info' : 'debug',
         COGNITO_USER_POOL_ID: props.identity.userPool.userPoolId,
         COGNITO_USER_POOL_CLIENT_ID: props.identity.userPoolClient.userPoolClientId,
-        BEDROCK_KB_ID: props.legalKbId ?? process.env.BEDROCK_KB_ID ?? '',
+        BEDROCK_KB_ID: process.env.BEDROCK_KB_ID ?? '',
         BEDROCK_KB_REGION: kbRegionForStrategy,
         BEDROCK_RERANK_REGION: rerankRegionForStrategy,
         BEDROCK_RERANK_MODEL: rerankModelForStrategy,
@@ -509,7 +508,7 @@ export class ApiStack extends Stack {
         DATABASE_NAME: 'yourmillionare',
         APP_REGION: region,
         LOG_LEVEL: isProd ? 'info' : 'debug',
-        BEDROCK_KB_ID: props.legalKbId ?? process.env.BEDROCK_KB_ID ?? '',
+        BEDROCK_KB_ID: process.env.BEDROCK_KB_ID ?? '',
         BEDROCK_KB_REGION: kbRegion,
         BEDROCK_RERANK_REGION: rerankRegion,
         BEDROCK_RERANK_MODEL: rerankModel,
