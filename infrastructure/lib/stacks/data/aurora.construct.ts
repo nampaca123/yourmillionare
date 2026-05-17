@@ -21,6 +21,7 @@ import { NagSuppressions } from 'cdk-nag';
 import type { Construct } from 'constructs';
 
 import type { DeploymentEnv } from '../../config/env.config.js';
+import { AuroraVectorParamGroup } from './aurora-vector-param-group.construct.js';
 
 const DATABASE_NAME = 'yourmillionare';
 const PG_15_10 = AuroraPostgresEngineVersion.of('15.10', '15');
@@ -53,8 +54,14 @@ export class AuroraConstruct {
       removalPolicy: isProd ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY,
     });
 
+    const clusterEngine = DatabaseClusterEngine.auroraPostgres({ version: PG_15_10 });
+
+    const vectorParamGroup = new AuroraVectorParamGroup(scope, `${id}VectorParamGroup`, {
+      engine: clusterEngine,
+    });
+
     this.cluster = new DatabaseCluster(scope, id, {
-      engine: DatabaseClusterEngine.auroraPostgres({ version: PG_15_10 }),
+      engine: clusterEngine,
       writer: ClusterInstance.serverlessV2('writer', {
         enablePerformanceInsights: true,
         performanceInsightRetention: PerformanceInsightRetention.DEFAULT,
@@ -78,6 +85,7 @@ export class AuroraConstruct {
       autoMinorVersionUpgrade: true,
       cloudwatchLogsExports: ['postgresql'],
       cloudwatchLogsRetention: isProd ? RetentionDays.THREE_MONTHS : RetentionDays.TWO_WEEKS,
+      parameterGroup: vectorParamGroup.parameterGroup,
     });
 
     if (!this.cluster.secret) throw new Error('Aurora master secret was not created');
