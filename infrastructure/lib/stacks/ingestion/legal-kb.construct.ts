@@ -1,6 +1,6 @@
 // Construct: Bedrock Knowledge Base wired to Aurora pgvector storage + S3 data source for legal corpus retrieval.
 
-import { CfnResource, RemovalPolicy, Stack } from 'aws-cdk-lib';
+import { CfnResource, Stack } from 'aws-cdk-lib';
 import type { IBucket } from 'aws-cdk-lib/aws-s3';
 import { Effect, PolicyDocument, PolicyStatement, Role, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
 import type { ISecret } from 'aws-cdk-lib/aws-secretsmanager';
@@ -156,7 +156,6 @@ export class LegalKbConstruct extends Construct {
         },
       },
     });
-    kb.applyRemovalPolicy(RemovalPolicy.RETAIN);
     this.kbId = kb.getAtt('KnowledgeBaseId').toString();
     this.kbArn = kb.getAtt('KnowledgeBaseArn').toString();
 
