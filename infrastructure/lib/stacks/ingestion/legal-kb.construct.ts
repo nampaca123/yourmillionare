@@ -81,17 +81,10 @@ export class LegalKbConstruct extends Construct {
             }),
           ],
         }),
-        SecretAccess: new PolicyDocument({
-          statements: [
-            new PolicyStatement({
-              effect: Effect.ALLOW,
-              actions: ['secretsmanager:GetSecretValue'],
-              resources: [props.auroraKbSecret.secretArn],
-            }),
-          ],
-        }),
       },
     });
+
+    props.auroraKbSecret.grantRead(kbRole);
 
     NagSuppressions.addResourceSuppressions(
       kbRole,
@@ -99,7 +92,7 @@ export class LegalKbConstruct extends Construct {
         {
           id: 'AwsSolutions-IAM5',
           reason:
-            'Bedrock KB ingestion role needs s3:GetObject across the corpus bucket prefix (chunks/*) because object keys are generated per-law-revision. RDS Data API actions are scoped to the cluster ARN.',
+            'Bedrock KB ingestion role needs s3:GetObject across the corpus bucket prefix (chunks/*) because corpus object keys are generated dynamically per law revision. All other resources are scoped to specific ARNs.',
         },
       ],
       true,
