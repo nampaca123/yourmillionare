@@ -5,6 +5,7 @@ import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-sec
 import type { CloudFormationCustomResourceEvent, CloudFormationCustomResourceResponse } from 'aws-lambda';
 
 const REQUIRED_ENV = ['CLUSTER_ARN', 'MASTER_SECRET_ARN', 'KB_SECRET_ARN', 'DATABASE_NAME'] as const;
+const PHYSICAL_ID = 'kb-password-binder';
 type EnvKey = typeof REQUIRED_ENV[number];
 
 const readEnv = (): Record<EnvKey, string> => {
@@ -23,7 +24,7 @@ const sm = new SecretsManagerClient({});
 export const handler = async (event: CloudFormationCustomResourceEvent): Promise<CloudFormationCustomResourceResponse> => {
   const env = readEnv();
   const common = {
-    PhysicalResourceId: event.LogicalResourceId,
+    PhysicalResourceId: event.RequestType === 'Create' ? PHYSICAL_ID : (event.PhysicalResourceId ?? PHYSICAL_ID),
     StackId: event.StackId,
     RequestId: event.RequestId,
     LogicalResourceId: event.LogicalResourceId,

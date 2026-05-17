@@ -8,6 +8,7 @@ BEGIN
 END
 $$;
 
+GRANT CONNECT ON DATABASE yourmillionare TO bedrock_kb_user;
 GRANT USAGE ON SCHEMA bedrock_integration TO bedrock_kb_user;
 GRANT SELECT, INSERT, UPDATE, DELETE ON bedrock_integration.bedrock_kb_legal TO bedrock_kb_user;
 ALTER DEFAULT PRIVILEGES IN SCHEMA bedrock_integration

@@ -37,6 +37,7 @@ export interface DataStackProps extends StackProps {
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const AURORA_PORT = 5432;
 const SCHEMA_PATH = join(__dirname, '../../../schema.sql');
 const BOOTSTRAP_PATH = join(__dirname, 'data/sql/db-bootstrap.sql');
 const MIGRATIONS_DIR = join(__dirname, 'data/sql/migrations');
@@ -174,12 +175,13 @@ export class DataStack extends Stack {
 
     const kbDbSecret = new Secret(this, 'BedrockKbDbSecret', {
       secretName: `${this.stackName}-bedrock-kb-db-credentials`,
+      encryptionKey: props.sharedKey,
       generateSecretString: {
         secretStringTemplate: JSON.stringify({
           username: 'bedrock_kb_user',
           dbname: 'yourmillionare',
           host: aurora.cluster.clusterEndpoint.hostname,
-          port: 5432,
+          port: AURORA_PORT,
           engine: 'postgres',
           dbClusterIdentifier: aurora.cluster.clusterIdentifier,
         }),
@@ -269,7 +271,7 @@ export class DataStack extends Stack {
         CLUSTER_ENDPOINT: aurora.cluster.clusterEndpoint.hostname,
         CLUSTER_ARN: aurora.cluster.clusterArn,
         SECRET_ARN: aurora.masterSecret.secretArn,
-        CLUSTER_PORT: '5432',
+        CLUSTER_PORT: String(AURORA_PORT),
         DATABASE_NAME: 'yourmillionare',
         APP_REGION: region,
       },
